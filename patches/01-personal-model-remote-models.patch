@@ -1,0 +1,2432 @@
+diff --git a/packages/provider/src/config-service.ts b/packages/provider/src/config-service.ts
+index 5ae36c69..eb929761 100644
+--- a/packages/provider/src/config-service.ts
++++ b/packages/provider/src/config-service.ts
+@@ -17,6 +17,12 @@ import {
+   resolveProviderTemplateName,
+ } from "./config/index.js";
+ import { resolveOwnedOrder } from "./owned-order.js";
++import {
++  normalizeHiddenInheritedModelIds,
++  resolvePersonalModelDeletionPlan,
++  resolveRemoteModelImportPlan,
++  type RemoteModelImportPlan,
++} from "./personal-model-membership.js";
+ import type { ModelSelection } from "@zcode/shared/model-selection";
+ import type { ProviderConfigSnapshot, ProviderSource } from "./sources.js";
+ 
+@@ -528,28 +534,33 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
+     const builtin = await this.#zcodeBuiltinSource.read();
+     return this.#updatePersonal((current) => {
+       assertMembershipCurrent(membership, normalizedProviderId, current);
+-      const provider = current.providers.get(normalizedProviderId);
++      const provider = writableProviderOverlay(builtin, current, normalizedProviderId);
+       const inherited =
+         membership?.inheritedModelIds ??
+         resolveProviderBuiltinModelIds(builtin, current.providers, normalizedProviderId);
+-      if (inherited.includes(normalizedModelId))
+-        throw new Error(`Built-in Model 不能删除: ${normalizedProviderId}/${normalizedModelId}`);
+-      if (!provider?.personalModelIds?.includes(normalizedModelId)) {
+-        throw new Error(`Personal Model 不存在: ${normalizedProviderId}/${normalizedModelId}`);
++      const plan = resolvePersonalModelDeletionPlan({
++        modelId: normalizedModelId,
++        inheritedModelIds: inherited,
++        personalModelIds: provider.personalModelIds ?? [],
++        hiddenInheritedModelIds: provider.hiddenInheritedModelIds,
++      });
++      if (plan.kind === "inherited") {
++        return {
++          providers: current.providers.set(
++            normalizedProviderId,
++            provider.withHiddenInheritedModelIds(plan.nextHiddenInheritedModelIds),
++          ),
++          models: current.models,
++          providerOrder: current.providerOrder,
++        };
+       }
+       return {
+         providers: current.providers.set(
+           normalizedProviderId,
+           provider
+-            .withPersonalModelIds(
+-              provider.personalModelIds.filter((candidate) => candidate !== normalizedModelId),
+-            )
++            .withPersonalModelIds(plan.nextPersonalModelIds)
+             .withModelOrder(
+-              normalizeModelOrder(
+-                inherited,
+-                provider.personalModelIds.filter((candidate) => candidate !== normalizedModelId),
+-                provider.modelOrder ?? [],
+-              ),
++              normalizeModelOrder(inherited, plan.nextPersonalModelIds, provider.modelOrder ?? []),
+             ),
+         ),
+         models: current.models.deleteExact(normalizedProviderId, normalizedModelId),
+@@ -558,6 +569,91 @@ export class ProviderConfigService implements ProviderSource<ProviderConfigSnaps
+     });
+   }
+ 
++  async importRemoteModels(
++    providerId: ProviderId,
++    remoteModelIds: readonly ModelId[],
++    membership?: ProviderModelMembership,
++    modelConfigs?: Readonly<Record<string, ModelConfig>>,
++  ): Promise<RemoteModelImportPlan> {
++    const normalizedProviderId = normalizeId("providerId", providerId);
++    const builtin = await this.#zcodeBuiltinSource.read();
++    let resolvedPlan: RemoteModelImportPlan | undefined;
++    await this.#updatePersonal((current) => {
++      assertMembershipCurrent(membership, normalizedProviderId, current);
++      const provider = writableProviderOverlay(builtin, current, normalizedProviderId);
++      const inherited =
++        membership?.inheritedModelIds ??
++        resolveProviderBuiltinModelIds(builtin, current.providers, normalizedProviderId);
++      const plan = resolveRemoteModelImportPlan({
++        remoteModelIds,
++        inheritedModelIds: inherited,
++        personalModelIds: provider.personalModelIds ?? [],
++        hiddenInheritedModelIds: provider.hiddenInheritedModelIds,
++      });
++      resolvedPlan = plan;
++      let models = current.models;
++      for (const modelId of plan.addedModelIds) {
++        models = models.setExact(
++          normalizedProviderId,
++          modelId,
++          (modelConfigs?.[modelId] ?? new ModelConfig({})).overlay(
++            new ModelConfig({ enabled: true }),
++          ),
++          true,
++        );
++      }
++      return {
++        providers: current.providers.set(
++          normalizedProviderId,
++          provider
++            .withPersonalModelIds(plan.nextPersonalModelIds)
++            .withHiddenInheritedModelIds(plan.nextHiddenInheritedModelIds)
++            .withModelOrder(
++              normalizeModelOrder(inherited, plan.nextPersonalModelIds, [
++                ...(provider.modelOrder ?? []),
++                ...plan.addedModelIds,
++                ...plan.restoredInheritedModelIds,
++              ]),
++            ),
++        ),
++        models,
++        providerOrder: current.providerOrder,
++      };
++    });
++    if (!resolvedPlan) throw new Error(`导入远端模型失败: ${normalizedProviderId}`);
++    return resolvedPlan;
++  }
++
++  async clearVisibleModels(
++    providerId: ProviderId,
++    membership?: ProviderModelMembership,
++  ): Promise<ProviderConfigLayerSnapshot> {
++    const normalizedProviderId = normalizeId("providerId", providerId);
++    const builtin = await this.#zcodeBuiltinSource.read();
++    return this.#updatePersonal((current) => {
++      assertMembershipCurrent(membership, normalizedProviderId, current);
++      const provider = writableProviderOverlay(builtin, current, normalizedProviderId);
++      const inherited =
++        membership?.inheritedModelIds ??
++        resolveProviderBuiltinModelIds(builtin, current.providers, normalizedProviderId);
++      let models = current.models;
++      for (const modelId of provider.personalModelIds ?? []) {
++        models = models.deleteExact(normalizedProviderId, modelId);
++      }
++      return {
++        providers: current.providers.set(
++          normalizedProviderId,
++          provider
++            .withPersonalModelIds([])
++            .withHiddenInheritedModelIds(normalizeHiddenInheritedModelIds(inherited, inherited))
++            .withModelOrder([]),
++        ),
++        models,
++        providerOrder: current.providerOrder,
++      };
++    });
++  }
++
+   dispose(): void {
+     if (this.#disposed) return;
+     this.#disposed = true;
+@@ -623,7 +719,11 @@ function normalizePersonalProviderMembership(
+   const personalModelIds = uniqueInOrder(personal.personalModelIds ?? []).filter(
+     (modelId) => !builtinSet.has(modelId),
+   );
+-  let normalized = personal.withPersonalModelIds(personalModelIds);
++  let normalized = personal
++    .withPersonalModelIds(personalModelIds)
++    .withHiddenInheritedModelIds(
++      normalizeHiddenInheritedModelIds(builtinModelIds, personal.hiddenInheritedModelIds),
++    );
+   if (personal.modelOrder !== undefined && personal.modelOrder !== null) {
+     normalized = normalized.withModelOrder(
+       normalizeModelOrder(builtinModelIds, personalModelIds, personal.modelOrder),
+diff --git a/packages/provider/src/config/model-config.ts b/packages/provider/src/config/model-config.ts
+index beb7e9a5..2e661d0c 100644
+--- a/packages/provider/src/config/model-config.ts
++++ b/packages/provider/src/config/model-config.ts
+@@ -380,6 +380,12 @@ export class ModelConfigRules {
+     return new ModelConfigRules([...builtin.rules(), ...personal.rules().filter(isExactModelRule)]);
+   }
+ 
++  withoutGenericModelFallback(): ModelConfigRules {
++    return new ModelConfigRules(
++      this.#rules.filter((rule) => !("modelMatch" in rule) || rule.modelMatch !== ".*"),
++    );
++  }
++
+   rules(): readonly ModelConfigRule[] {
+     return this.#rules;
+   }
+diff --git a/packages/provider/src/config/provider-config.ts b/packages/provider/src/config/provider-config.ts
+index a566b133..2aef7664 100644
+--- a/packages/provider/src/config/provider-config.ts
++++ b/packages/provider/src/config/provider-config.ts
+@@ -177,6 +177,7 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+   readonly api?: ProviderApiConfig | null;
+   readonly builtinModelIds?: ProviderConfigObject["builtinModelIds"];
+   readonly personalModelIds?: ProviderConfigObject["personalModelIds"];
++  readonly hiddenInheritedModelIds?: ProviderConfigObject["hiddenInheritedModelIds"];
+   readonly modelOrder?: ProviderConfigObject["modelOrder"];
+   readonly visibility?: ProviderConfigObject["visibility"];
+ 
+@@ -188,6 +189,7 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+     this.api = input.api;
+     this.builtinModelIds = freezeModelIds(input.builtinModelIds);
+     this.personalModelIds = freezeModelIds(input.personalModelIds);
++    this.hiddenInheritedModelIds = freezeModelIds(input.hiddenInheritedModelIds);
+     this.modelOrder = freezeModelIds(input.modelOrder);
+     this.visibility = input.visibility;
+     Object.freeze(this);
+@@ -201,6 +203,10 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+       api: this.overlayConfig(this.api, next.api),
+       builtinModelIds: this.overlayValue(this.builtinModelIds, next.builtinModelIds),
+       personalModelIds: this.overlayValue(this.personalModelIds, next.personalModelIds),
++      hiddenInheritedModelIds: this.overlayValue(
++        this.hiddenInheritedModelIds,
++        next.hiddenInheritedModelIds,
++      ),
+       modelOrder: this.overlayValue(this.modelOrder, next.modelOrder),
+       visibility: this.overlayValue(this.visibility, next.visibility),
+     });
+@@ -214,6 +220,10 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+     return this.overlay(new ProviderConfig({ personalModelIds: modelIds }));
+   }
+ 
++  withHiddenInheritedModelIds(modelIds: readonly ModelId[]): ProviderConfig {
++    return this.overlay(new ProviderConfig({ hiddenInheritedModelIds: modelIds }));
++  }
++
+   withModelOrder(modelOrder: readonly ModelId[]): ProviderConfig {
+     return this.overlay(new ProviderConfig({ modelOrder }));
+   }
+@@ -225,6 +235,7 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+       api: this.api,
+       builtinModelIds: this.builtinModelIds,
+       personalModelIds: this.personalModelIds,
++      hiddenInheritedModelIds: this.hiddenInheritedModelIds,
+       modelOrder: this.modelOrder,
+       visibility: this.visibility,
+     });
+@@ -239,6 +250,7 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+       api: this.api,
+       builtinModelIds: source?.builtinModelIds,
+       personalModelIds: source?.personalModelIds,
++      hiddenInheritedModelIds: source?.hiddenInheritedModelIds,
+       modelOrder: source?.modelOrder,
+       visibility: this.visibility,
+     });
+@@ -257,6 +269,7 @@ export class ProviderConfig extends ConfigOverlay<ProviderConfig> {
+       api: this.api?.toJSON() ?? this.api,
+       builtinModelIds: this.builtinModelIds,
+       personalModelIds: this.personalModelIds,
++      hiddenInheritedModelIds: this.hiddenInheritedModelIds,
+       modelOrder: this.modelOrder,
+       visibility: this.visibility,
+     });
+diff --git a/packages/provider/src/config/provider-data-schema.ts b/packages/provider/src/config/provider-data-schema.ts
+index 36f73a1c..3f82126f 100644
+--- a/packages/provider/src/config/provider-data-schema.ts
++++ b/packages/provider/src/config/provider-data-schema.ts
+@@ -90,6 +90,7 @@ export const providerConfigDataSchema = z
+     api: providerApiDataSchema.nullable().optional(),
+     builtinModelIds: modelIdsDataSchema,
+     personalModelIds: modelIdsDataSchema,
++    hiddenInheritedModelIds: modelIdsDataSchema,
+     modelOrder: modelIdsDataSchema,
+     visibility: providerVisibilityDataSchema.nullable().optional(),
+   })
+diff --git a/packages/provider/src/config/rule-data-schema.ts b/packages/provider/src/config/rule-data-schema.ts
+index 509b5549..79a08137 100644
+--- a/packages/provider/src/config/rule-data-schema.ts
++++ b/packages/provider/src/config/rule-data-schema.ts
+@@ -101,7 +101,11 @@ export const providerTemplateConfigRuleSchema = providerTemplateDataSchema.exten
+     }),
+ });
+ export const builtinProviderConfigRuleSchema = providerConfigRuleSchema.extend({
+-  config: providerConfigDataSchema.omit({ personalModelIds: true, modelOrder: true }).extend({
++  config: providerConfigDataSchema.omit({
++    personalModelIds: true,
++    hiddenInheritedModelIds: true,
++    modelOrder: true,
++  }).extend({
+     group: providerGroupDataSchema.exclude(["standard-personal"]),
+   }),
+ });
+diff --git a/packages/provider/src/facades.ts b/packages/provider/src/facades.ts
+index 015acca6..9eca38a1 100644
+--- a/packages/provider/src/facades.ts
++++ b/packages/provider/src/facades.ts
+@@ -1,6 +1,7 @@
+ /* oxlint-disable eslint(max-lines) -- Settings/Selection Facade 共享同一套 Registry 投影与写入边界。 */
+ import type { ConfigValidationIssue } from "./config-overlay.js";
+ import type { ProviderModelMembership } from "./config-service.js";
++import type { RemoteModelImportPlan } from "./personal-model-membership.js";
+ import type {
+   ModelConfig,
+   ModelConfigObject,
+@@ -83,6 +84,16 @@ export interface ProviderSettingsMutationTarget {
+     modelId: ModelId,
+     membership?: ProviderModelMembership,
+   ): Promise<unknown>;
++  importRemoteModels(
++    providerId: ProviderId,
++    remoteModelIds: readonly ModelId[],
++    membership?: ProviderModelMembership,
++    modelConfigs?: Readonly<Record<string, ModelConfig>>,
++  ): Promise<RemoteModelImportPlan>;
++  clearVisibleModels(
++    providerId: ProviderId,
++    membership?: ProviderModelMembership,
++  ): Promise<unknown>;
+   savePersonalModelDraft(
+     providerId: ProviderId,
+     originalModelId: ModelId,
+@@ -180,6 +191,13 @@ export interface ProviderSettingsCreationResult {
+   readonly view: ProviderSettingsView;
+ }
+ 
++export interface ProviderSettingsRemoteModelsImportResult {
++  readonly view: ProviderSettingsView;
++  readonly addedModelIds: readonly ModelId[];
++  readonly restoredInheritedModelIds: readonly ModelId[];
++  readonly skippedModelIds: readonly ModelId[];
++}
++
+ export interface ModelSelectionModelView {
+   readonly modelId: ModelId;
+   readonly config: RegistryModelConfigObject;
+@@ -297,6 +315,25 @@ export class ProviderSettingsFacade {
+     });
+   }
+ 
++  /** 不含通用 `.*` 模型兜底，供目录信息只填补真正空缺的字段。 */
++  resolveSpecificBuiltinModelConfig(input: {
++    readonly providerId: ProviderId;
++    readonly modelId: ModelId;
++  }): ModelConfigObject {
++    const snapshot = requireSnapshot(this.#source);
++    const provider = requireEffectiveProvider(snapshot, input.providerId);
++    return snapshot.config.zcodeBuiltinModelRules
++      .withoutGenericModelFallback()
++      .resolve({
++        providerId: input.providerId,
++        templateId: provider.templateId,
++        modelId: input.modelId,
++        apiType: provider.config.api?.type,
++        baseUrl: provider.config.api?.baseUrl,
++      })
++      .toJSON();
++  }
++
+   onDidChange(listener: (view: ProviderSettingsView) => void): () => void {
+     return this.#source.onDidChange(() => listener(this.getView()));
+   }
+@@ -393,6 +430,36 @@ export class ProviderSettingsFacade {
+     );
+   }
+ 
++  importRemoteModels(
++    providerId: ProviderId,
++    remoteModelIds: readonly ModelId[],
++    modelConfigs?: Readonly<Record<string, ModelConfig>>,
++  ): Promise<ProviderSettingsRemoteModelsImportResult> {
++    let plan: RemoteModelImportPlan | undefined;
++    return this.#mutateProvider(providerId, "import-remote-models", async (target) => {
++      plan = await target.importRemoteModels(
++        providerId,
++        remoteModelIds,
++        this.#modelMembership(providerId),
++        modelConfigs,
++      );
++    }).then((view) => {
++      if (!plan) throw new Error(`导入远端模型失败: ${providerId}`);
++      return {
++        view,
++        addedModelIds: plan.addedModelIds,
++        restoredInheritedModelIds: plan.restoredInheritedModelIds,
++        skippedModelIds: plan.skippedModelIds,
++      };
++    });
++  }
++
++  clearVisibleModels(providerId: ProviderId): Promise<ProviderSettingsView> {
++    return this.#mutateProvider(providerId, "clear-visible-models", (target) =>
++      target.clearVisibleModels(providerId, this.#modelMembership(providerId)),
++    );
++  }
++
+   savePersonalModelDraft(input: SavePersonalModelDraftInput): Promise<ProviderSettingsView> {
+     return this.#mutateProvider(input.providerId, "save-model-draft", async (target) => {
+       const snapshot = requireSnapshot(this.#source);
+@@ -437,13 +504,12 @@ export class ProviderSettingsFacade {
+       (item) => item.providerId === providerId,
+     );
+     if (!provider) throw new Error(`Provider 不存在: ${providerId}`);
+-    // 配置成员与可执行模型不是同一名单：禁用、无权益和不完整模型仍可编辑。
+-    // Account 的空/替换名单也必须原样使用，不能再与静态 Built-in 取并集。
++    // 配置成员与可执行/可见模型不是同一名单：禁用、无权益、不完整和已隐藏的
++    // 继承模型仍属于该实例，不能只按当前 Settings 列表回推。
++    // Account 的空/替换名单以 overlay 后的 builtinModelIds 为准，不再与静态 Built-in 取并集。
+     return Object.freeze({
+       providerId,
+-      inheritedModelIds: Object.freeze(
+-        provider.models.filter((model) => model.source === "builtin").map((model) => model.modelId),
+-      ),
++      inheritedModelIds: Object.freeze([...(provider.config.builtinModelIds ?? [])]),
+       personalRevision: snapshot.config.personalRevision,
+       assertCurrent: () => {
+         if (this.#source.getSnapshot() !== snapshot)
+diff --git a/packages/provider/src/personal-model-membership.ts b/packages/provider/src/personal-model-membership.ts
+new file mode 100644
+index 00000000..86c758af
+--- /dev/null
++++ b/packages/provider/src/personal-model-membership.ts
+@@ -0,0 +1,100 @@
++import type { ModelId } from "./config/ids.js";
++
++function uniqueInOrder(values: readonly string[]): string[] {
++  const result: string[] = [];
++  for (const value of values) {
++    const normalized = value.trim();
++    if (!normalized || result.includes(normalized)) continue;
++    result.push(normalized);
++  }
++  return result;
++}
++
++export function normalizeHiddenInheritedModelIds(
++  inheritedModelIds: readonly ModelId[],
++  hiddenInheritedModelIds?: readonly ModelId[] | null,
++): ModelId[] {
++  const inherited = new Set(uniqueInOrder(inheritedModelIds));
++  return uniqueInOrder(hiddenInheritedModelIds ?? []).filter((modelId) => inherited.has(modelId));
++}
++
++export function resolveVisibleInheritedModelIds(
++  inheritedModelIds: readonly ModelId[],
++  hiddenInheritedModelIds?: readonly ModelId[] | null,
++): ModelId[] {
++  const hidden = new Set(normalizeHiddenInheritedModelIds(inheritedModelIds, hiddenInheritedModelIds));
++  return uniqueInOrder(inheritedModelIds).filter((modelId) => !hidden.has(modelId));
++}
++
++export type PersonalModelDeletionPlan =
++  | { readonly kind: "personal"; readonly nextPersonalModelIds: readonly ModelId[] }
++  | { readonly kind: "inherited"; readonly nextHiddenInheritedModelIds: readonly ModelId[] };
++
++export function resolvePersonalModelDeletionPlan(input: {
++  readonly modelId: ModelId;
++  readonly inheritedModelIds: readonly ModelId[];
++  readonly personalModelIds: readonly ModelId[];
++  readonly hiddenInheritedModelIds?: readonly ModelId[] | null;
++}): PersonalModelDeletionPlan {
++  const modelId = input.modelId.trim();
++  const inherited = uniqueInOrder(input.inheritedModelIds);
++  const personal = uniqueInOrder(input.personalModelIds);
++  if (personal.includes(modelId)) {
++    return { kind: "personal", nextPersonalModelIds: personal.filter((candidate) => candidate !== modelId) };
++  }
++  if (inherited.includes(modelId)) {
++    return {
++      kind: "inherited",
++      nextHiddenInheritedModelIds: normalizeHiddenInheritedModelIds(inherited, [
++        ...(input.hiddenInheritedModelIds ?? []),
++        modelId,
++      ]),
++    };
++  }
++  throw new Error(`Model 不存在: ${modelId}`);
++}
++
++export interface RemoteModelImportPlan {
++  readonly nextPersonalModelIds: readonly ModelId[];
++  readonly nextHiddenInheritedModelIds: readonly ModelId[];
++  readonly addedModelIds: readonly ModelId[];
++  readonly restoredInheritedModelIds: readonly ModelId[];
++  readonly skippedModelIds: readonly ModelId[];
++}
++
++export function resolveRemoteModelImportPlan(input: {
++  readonly remoteModelIds: readonly ModelId[];
++  readonly inheritedModelIds: readonly ModelId[];
++  readonly personalModelIds: readonly ModelId[];
++  readonly hiddenInheritedModelIds?: readonly ModelId[] | null;
++}): RemoteModelImportPlan {
++  const inherited = uniqueInOrder(input.inheritedModelIds);
++  const inheritedSet = new Set(inherited);
++  const personal = uniqueInOrder(input.personalModelIds);
++  const personalSet = new Set(personal);
++  const hidden = new Set(normalizeHiddenInheritedModelIds(inherited, input.hiddenInheritedModelIds));
++  const addedModelIds: ModelId[] = [];
++  const restoredInheritedModelIds: ModelId[] = [];
++  const skippedModelIds: ModelId[] = [];
++  for (const remoteId of uniqueInOrder(input.remoteModelIds)) {
++    if (hidden.has(remoteId)) {
++      hidden.delete(remoteId);
++      restoredInheritedModelIds.push(remoteId);
++      continue;
++    }
++    if (inheritedSet.has(remoteId) || personalSet.has(remoteId)) {
++      skippedModelIds.push(remoteId);
++      continue;
++    }
++    personal.push(remoteId);
++    personalSet.add(remoteId);
++    addedModelIds.push(remoteId);
++  }
++  return {
++    nextPersonalModelIds: personal,
++    nextHiddenInheritedModelIds: [...hidden],
++    addedModelIds,
++    restoredInheritedModelIds,
++    skippedModelIds,
++  };
++}
+diff --git a/packages/provider/src/resolver.ts b/packages/provider/src/resolver.ts
+index 9a24ad42..496dceed 100644
+--- a/packages/provider/src/resolver.ts
++++ b/packages/provider/src/resolver.ts
+@@ -20,6 +20,7 @@ import {
+   type ProviderId,
+ } from "./config/index.js";
+ import { resolveOwnedOrder } from "./owned-order.js";
++import { resolveVisibleInheritedModelIds } from "./personal-model-membership.js";
+ import type { AccountProviderStates } from "./account-provider-state.js";
+ 
+ export type RegistryZhipuAccountAccessConfig = ZhipuAccountAccessConfig &
+@@ -64,6 +65,9 @@ export function serializeRegistryProviderConfig(
+     },
+     ...(config.builtinModelIds == null ? {} : { builtinModelIds: [...config.builtinModelIds] }),
+     ...(config.personalModelIds == null ? {} : { personalModelIds: [...config.personalModelIds] }),
++    ...(config.hiddenInheritedModelIds == null
++      ? {}
++      : { hiddenInheritedModelIds: [...config.hiddenInheritedModelIds] }),
+     ...(config.modelOrder == null ? {} : { modelOrder: [...config.modelOrder] }),
+     ...(config.visibility === undefined ? {} : { visibility: config.visibility }),
+   };
+@@ -234,12 +238,16 @@ export class ProviderConfigResolver {
+         });
+       }
+       issues.push(...providerIssues);
+-      const builtinModelIds = config.builtinModelIds ?? [];
++      const builtinModelIds = resolveVisibleInheritedModelIds(
++        config.builtinModelIds ?? [],
++        config.hiddenInheritedModelIds,
++      );
++      const inheritedModelIds = config.builtinModelIds ?? [];
+       const personalModelIds = config.personalModelIds ?? [];
+       const builtinIdsInOrder = uniqueInOrder(builtinModelIds);
+-      const builtinIds = new Set(builtinIdsInOrder);
++      const inheritedIds = new Set(inheritedModelIds);
+       const personalIdsInOrder = uniqueInOrder(personalModelIds).filter(
+-        (modelId) => !builtinIds.has(modelId),
++        (modelId) => !inheritedIds.has(modelId),
+       );
+       const orderedModelIds = resolveOwnedOrder(
+         builtinIdsInOrder,
+@@ -281,7 +289,7 @@ export class ProviderConfigResolver {
+         return Object.freeze({
+           kind: "candidate",
+           modelId,
+-          source: builtinIds.has(modelId) ? "builtin" : "personal",
++          source: inheritedIds.has(modelId) ? "builtin" : "personal",
+           config: modelConfig,
+           effectiveBuiltinConfig,
+           issues: Object.freeze(modelIssues),
+diff --git a/packages/services/src/model-provider/modelInfoCatalog.ts b/packages/services/src/model-provider/modelInfoCatalog.ts
+new file mode 100644
+index 00000000..602455b5
+--- /dev/null
++++ b/packages/services/src/model-provider/modelInfoCatalog.ts
+@@ -0,0 +1,235 @@
++import { ModelConfig, type ModelConfigObject } from "@zcode/provider";
++
++import {
++  arrayOfStrings,
++  bestMatch,
++  compactInfo,
++  hasParameter,
++  inputModalities,
++  modalityFlags,
++  modalityWords,
++  modelEntries,
++  nested,
++  nestedArray,
++  nestedNumber,
++  nestedString,
++  numberValue,
++  positiveInt,
++  readId,
++  reasoningLevelsFromOpenRouter,
++  reasoningLevelsFromOptions,
++  mapReasoningLevels,
++} from "./modelInfoCatalogParse.js";
++
++/** 供应商 /models 与公开目录都能填进模型配置的字段。供应商返回值优先。 */
++export interface CatalogModelInfo {
++  readonly contextWindow?: number;
++  readonly maxOutputTokens?: number;
++  readonly supportsImage?: boolean;
++  readonly supportsVideo?: boolean;
++  readonly supportsAudio?: boolean;
++  readonly supportsPdf?: boolean;
++  readonly supportsToolCall?: boolean;
++  readonly supportsNativeWebSearch?: boolean;
++  readonly reasoningLevels?: readonly string[];
++}
++
++export function parseProviderModelCatalog(payload: unknown): {
++  readonly modelIds: string[];
++  readonly info: Readonly<Record<string, CatalogModelInfo>>;
++} {
++  const entries = modelEntries(payload);
++  const modelIds: string[] = [];
++  const seen = new Set<string>();
++  const info: Record<string, CatalogModelInfo> = {};
++  for (const entry of entries) {
++    const modelId = readId(entry);
++    if (!modelId || seen.has(modelId)) continue;
++    seen.add(modelId);
++    modelIds.push(modelId);
++    const parsed = infoFromProviderEntry(entry);
++    if (parsed) info[modelId] = parsed;
++  }
++  return { modelIds, info };
++}
++
++export function mergeCatalogModelInfo(
++  current: CatalogModelInfo | undefined,
++  incoming: CatalogModelInfo,
++): CatalogModelInfo {
++  return {
++    contextWindow: current?.contextWindow ?? incoming.contextWindow,
++    maxOutputTokens: current?.maxOutputTokens ?? incoming.maxOutputTokens,
++    supportsImage: current?.supportsImage ?? incoming.supportsImage,
++    supportsVideo: current?.supportsVideo ?? incoming.supportsVideo,
++    supportsAudio: current?.supportsAudio ?? incoming.supportsAudio,
++    supportsPdf: current?.supportsPdf ?? incoming.supportsPdf,
++    supportsToolCall: current?.supportsToolCall ?? incoming.supportsToolCall,
++    supportsNativeWebSearch:
++      current?.supportsNativeWebSearch ?? incoming.supportsNativeWebSearch,
++    reasoningLevels:
++      current?.reasoningLevels && current.reasoningLevels.length > 0
++        ? current.reasoningLevels
++        : incoming.reasoningLevels,
++  };
++}
++
++export function findModelsDevInfo(catalog: unknown, modelId: string): CatalogModelInfo | undefined {
++  if (!catalog || typeof catalog !== "object") return undefined;
++  return bestMatch(modelId, function* () {
++    for (const provider of Object.values(catalog as Record<string, unknown>)) {
++      if (!provider || typeof provider !== "object") continue;
++      const models = (provider as { models?: unknown }).models;
++      if (!models || typeof models !== "object") continue;
++      for (const [key, value] of Object.entries(models as Record<string, unknown>)) {
++        if (!value || typeof value !== "object") continue;
++        const record = value as Record<string, unknown>;
++        const remoteId = typeof record.id === "string" ? record.id : key;
++        const limit = record.limit;
++        const info = compactInfo({
++          contextWindow: positiveInt(nestedNumber(limit, "context")),
++          maxOutputTokens: positiveInt(nestedNumber(limit, "output")),
++          ...modalityFlags(inputModalities(record.modalities)),
++          supportsToolCall: record.tool_call === true ? true : undefined,
++          reasoningLevels: reasoningLevelsFromOptions(record.reasoning_options),
++        });
++        if (info) yield { remoteId, info };
++        if (info) yield { remoteId: key, info };
++      }
++    }
++  });
++}
++
++export function findOpenRouterInfo(
++  catalog: unknown,
++  modelId: string,
++): CatalogModelInfo | undefined {
++  const data = nestedArray(catalog, "data");
++  if (!data) return undefined;
++  return bestMatch(modelId, function* () {
++    for (const item of data) {
++      if (!item || typeof item !== "object") continue;
++      const record = item as Record<string, unknown>;
++      if (typeof record.id !== "string") continue;
++      const architecture = record.architecture;
++      const modalities = arrayOfStrings(nested(architecture, "input_modalities"));
++      const info = compactInfo({
++        contextWindow: positiveInt(
++          numberValue(record.context_length) ??
++            nestedNumber(record.top_provider, "context_length"),
++        ),
++        maxOutputTokens: positiveInt(nestedNumber(record.top_provider, "max_completion_tokens")),
++        ...modalityFlags(modalities),
++        supportsToolCall: hasParameter(record.supported_parameters, ["tools", "tool_choice"])
++          ? true
++          : undefined,
++        reasoningLevels: reasoningLevelsFromOpenRouter(record.reasoning),
++      });
++      if (info) yield { remoteId: record.id, info };
++    }
++  });
++}
++
++export function findLiteLlmInfo(catalog: unknown, modelId: string): CatalogModelInfo | undefined {
++  if (!catalog || typeof catalog !== "object") return undefined;
++  return bestMatch(modelId, function* () {
++    for (const [key, value] of Object.entries(catalog as Record<string, unknown>)) {
++      if (key === "sample_spec" || !value || typeof value !== "object") continue;
++      const record = value as Record<string, unknown>;
++      const info = compactInfo({
++        contextWindow: positiveInt(
++          numberValue(record.max_input_tokens) ?? numberValue(record.max_tokens),
++        ),
++        maxOutputTokens: positiveInt(numberValue(record.max_output_tokens)),
++        supportsImage: record.supports_vision === true ? true : undefined,
++        supportsToolCall: record.supports_function_calling === true ? true : undefined,
++        supportsNativeWebSearch: record.supports_web_search === true ? true : undefined,
++      });
++      if (info) yield { remoteId: key, info };
++    }
++  });
++}
++
++/** 只生成具体内置规则还没写过的叶子，避免目录覆盖用户或模型专用配置。 */
++export function modelConfigFromCatalog(
++  specific: ModelConfigObject,
++  info: CatalogModelInfo | undefined,
++): ModelConfig | undefined {
++  if (!info) return undefined;
++  const properties: NonNullable<ModelConfigObject["properties"]> = {};
++  if (specific.properties?.contextWindow == null && info.contextWindow) {
++    properties.contextWindow = info.contextWindow;
++  }
++  const inputFormat: NonNullable<NonNullable<ModelConfigObject["properties"]>["inputFormat"]> = {};
++  assignMissingModality(inputFormat, specific, "supportsImage", info.supportsImage);
++  assignMissingModality(inputFormat, specific, "supportsVideo", info.supportsVideo);
++  assignMissingModality(inputFormat, specific, "supportsAudio", info.supportsAudio);
++  assignMissingModality(inputFormat, specific, "supportsPdf", info.supportsPdf);
++  if (Object.keys(inputFormat).length > 0) properties.inputFormat = inputFormat;
++  if (specific.properties?.supportsToolCall == null && info.supportsToolCall === true) {
++    properties.supportsToolCall = true;
++  }
++  if (specific.properties?.supportsNativeWebSearch == null && info.supportsNativeWebSearch === true) {
++    properties.supportsNativeWebSearch = true;
++  }
++  const optionSpecs: NonNullable<ModelConfigObject["optionSpecs"]> = {};
++  if (specific.optionSpecs?.maxOutputTokens?.max == null && info.maxOutputTokens) {
++    optionSpecs.maxOutputTokens = { max: info.maxOutputTokens };
++  }
++  if (
++    specific.optionSpecs?.reasoningLevel?.values == null &&
++    info.reasoningLevels &&
++    info.reasoningLevels.length > 0
++  ) {
++    optionSpecs.reasoningLevel = { values: info.reasoningLevels };
++  }
++  if (Object.keys(properties).length === 0 && Object.keys(optionSpecs).length === 0) return undefined;
++  return ModelConfig.fromData({
++    ...(Object.keys(properties).length > 0 ? { properties } : {}),
++    ...(Object.keys(optionSpecs).length > 0 ? { optionSpecs } : {}),
++  });
++}
++
++function assignMissingModality(
++  target: NonNullable<NonNullable<ModelConfigObject["properties"]>["inputFormat"]>,
++  specific: ModelConfigObject,
++  key: "supportsImage" | "supportsVideo" | "supportsAudio" | "supportsPdf",
++  value: boolean | undefined,
++): void {
++  if (specific.properties?.inputFormat?.[key] != null || value == null) return;
++  target[key] = value;
++}
++
++function infoFromProviderEntry(entry: unknown): CatalogModelInfo | undefined {
++  if (!entry || typeof entry !== "object") return undefined;
++  const record = entry as Record<string, unknown>;
++  const modalities = [
++    ...arrayOfStrings(nested(record.architecture, "input_modalities")),
++    ...modalityWords(nestedString(record.architecture, "modality")),
++  ];
++  const capabilities = arrayOfStrings(record.capabilities).map((item) => item.toLowerCase());
++  return compactInfo({
++    contextWindow: positiveInt(
++      numberValue(record.context_length) ??
++        numberValue(record.context_window) ??
++        numberValue(record.max_model_len) ??
++        nestedNumber(record.top_provider, "context_length"),
++    ),
++    maxOutputTokens: positiveInt(
++      numberValue(record.max_output_tokens) ??
++        numberValue(record.max_completion_tokens) ??
++        nestedNumber(record.top_provider, "max_completion_tokens"),
++    ),
++    ...modalityFlags(modalities.length > 0 ? modalities : undefined),
++    supportsToolCall:
++      capabilities.some(
++        (item) => item === "tools" || item === "tool_calling" || item === "function_calling",
++      ) || hasParameter(record.supported_parameters, ["tools", "tool_choice"])
++        ? true
++        : undefined,
++    supportsNativeWebSearch: capabilities.includes("web_search") ? true : undefined,
++    reasoningLevels:
++      reasoningLevelsFromOpenRouter(record.reasoning) ??
++      mapReasoningLevels(arrayOfStrings(record.reasoning_options)),
++  });
++}
+diff --git a/packages/services/src/model-provider/modelInfoCatalogFetch.ts b/packages/services/src/model-provider/modelInfoCatalogFetch.ts
+new file mode 100644
+index 00000000..07cc78e8
+--- /dev/null
++++ b/packages/services/src/model-provider/modelInfoCatalogFetch.ts
+@@ -0,0 +1,126 @@
++import type { CatalogModelInfo } from "./modelInfoCatalog.js";
++import {
++  findLiteLlmInfo,
++  findModelsDevInfo,
++  findOpenRouterInfo,
++  mergeCatalogModelInfo,
++} from "./modelInfoCatalog.js";
++
++const MODELS_DEV_URL = "https://models.dev/api.json";
++const OPENROUTER_URL = "https://openrouter.ai/api/v1/models";
++const LITELLM_URL =
++  "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
++const CATALOG_TIMEOUT_MS = 8_000;
++
++type CatalogKind = "models-dev" | "openrouter" | "litellm";
++
++const catalogCache = new Map<CatalogKind, unknown>();
++const catalogMisses = new Set<CatalogKind>();
++const catalogInflight = new Map<CatalogKind, Promise<unknown>>();
++const providerInfoCache = new Map<string, CatalogModelInfo>();
++
++export function rememberProviderModelInfo(
++  providerId: string,
++  info: Readonly<Record<string, CatalogModelInfo>>,
++): void {
++  for (const [modelId, modelInfo] of Object.entries(info)) {
++    providerInfoCache.set(cacheKey(providerId, modelId), modelInfo);
++  }
++}
++
++export function cachedProviderModelInfo(
++  providerId: string,
++  modelId: string,
++): CatalogModelInfo | undefined {
++  return providerInfoCache.get(cacheKey(providerId, modelId));
++}
++
++/** 预热公开目录缓存。获取远端模型列表时后台调用，不挡住勾选弹窗。 */
++export async function warmupPublicModelCatalogs(
++  fetchImpl: typeof fetch = globalThis.fetch,
++): Promise<void> {
++  await Promise.all([
++    loadCatalog("models-dev", MODELS_DEV_URL, fetchImpl),
++    loadCatalog("openrouter", OPENROUTER_URL, fetchImpl),
++    loadCatalog("litellm", LITELLM_URL, fetchImpl),
++  ]);
++}
++
++/** 公开目录失败时返回空，不挡住供应商自己已经给出的模型信息。 */
++export async function lookupPublicModelInfo(
++  modelId: string,
++  fetchImpl: typeof fetch = globalThis.fetch,
++): Promise<CatalogModelInfo | undefined> {
++  const [modelsDev, openRouter, liteLlm] = await Promise.all([
++    loadCatalog("models-dev", MODELS_DEV_URL, fetchImpl),
++    loadCatalog("openrouter", OPENROUTER_URL, fetchImpl),
++    loadCatalog("litellm", LITELLM_URL, fetchImpl),
++  ]);
++  let info: CatalogModelInfo | undefined;
++  const modelsDevInfo = modelsDev ? findModelsDevInfo(modelsDev, modelId) : undefined;
++  const openRouterInfo = openRouter ? findOpenRouterInfo(openRouter, modelId) : undefined;
++  const liteLlmInfo = liteLlm ? findLiteLlmInfo(liteLlm, modelId) : undefined;
++  if (modelsDevInfo) info = mergeCatalogModelInfo(info, modelsDevInfo);
++  if (openRouterInfo) info = mergeCatalogModelInfo(info, openRouterInfo);
++  if (liteLlmInfo) info = mergeCatalogModelInfo(info, liteLlmInfo);
++  return info;
++}
++
++async function loadCatalog(
++  kind: CatalogKind,
++  url: string,
++  fetchImpl: typeof fetch,
++): Promise<unknown> {
++  if (catalogCache.has(kind)) return catalogCache.get(kind);
++  if (catalogMisses.has(kind)) return undefined;
++  const pending = catalogInflight.get(kind);
++  if (pending) return pending;
++  const request = fetchCatalog(url, fetchImpl).then((result) => {
++    if (result.kind === "hit") {
++      catalogCache.set(kind, result.payload);
++      return result.payload;
++    }
++    // HTTP 明确失败才记 miss；超时或网络错误下次仍可重试。
++    if (result.sticky) catalogMisses.add(kind);
++    return undefined;
++  });
++  catalogInflight.set(kind, request);
++  try {
++    return await request;
++  } finally {
++    catalogInflight.delete(kind);
++  }
++}
++
++async function fetchCatalog(
++  url: string,
++  fetchImpl: typeof fetch,
++): Promise<{ kind: "hit"; payload: unknown } | { kind: "miss"; sticky: boolean }> {
++  const controller = new AbortController();
++  const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS);
++  try {
++    const response = await fetchImpl(url, {
++      method: "GET",
++      headers: { Accept: "application/json" },
++      signal: controller.signal,
++    });
++    if (!response.ok) return { kind: "miss", sticky: true };
++    return { kind: "hit", payload: await response.json() };
++  } catch {
++    return { kind: "miss", sticky: false };
++  } finally {
++    clearTimeout(timer);
++  }
++}
++
++function cacheKey(providerId: string, modelId: string): string {
++  return `${providerId}\u0000${modelId}`;
++}
++
++/** 单测重置进程内目录缓存；生产路径不得调用。 */
++export function resetPublicModelCatalogStateForTests(): void {
++  catalogCache.clear();
++  catalogMisses.clear();
++  catalogInflight.clear();
++  providerInfoCache.clear();
++}
+diff --git a/packages/services/src/model-provider/modelInfoCatalogParse.ts b/packages/services/src/model-provider/modelInfoCatalogParse.ts
+new file mode 100644
+index 00000000..678163fb
+--- /dev/null
++++ b/packages/services/src/model-provider/modelInfoCatalogParse.ts
+@@ -0,0 +1,213 @@
++import type { CatalogModelInfo } from "./modelInfoCatalog.js";
++
++const ZCODE_REASONING_LEVELS = [
++  "disabled",
++  "enabled",
++  "minimal",
++  "low",
++  "medium",
++  "high",
++  "xhigh",
++  "max",
++  "ultra",
++] as const;
++
++export function modalityFlags(
++  modalities: readonly string[] | undefined,
++): Pick<CatalogModelInfo, "supportsImage" | "supportsVideo" | "supportsAudio" | "supportsPdf"> {
++  if (!modalities) return {};
++  const set = new Set(modalities.map((item) => item.toLowerCase()));
++  return {
++    supportsImage: set.has("image"),
++    supportsVideo: set.has("video"),
++    supportsAudio: set.has("audio"),
++    supportsPdf: set.has("pdf"),
++  };
++}
++
++export function compactInfo(info: CatalogModelInfo): CatalogModelInfo | undefined {
++  const entries = Object.entries(info).filter(([, value]) => {
++    if (value == null) return false;
++    return !Array.isArray(value) || value.length > 0;
++  });
++  if (entries.length === 0) return undefined;
++  return Object.fromEntries(entries) as CatalogModelInfo;
++}
++
++export function bestMatch(
++  modelId: string,
++  candidates: () => Generator<{ remoteId: string; info: CatalogModelInfo }>,
++): CatalogModelInfo | undefined {
++  const local = modelIdCandidates(modelId);
++  let bestScore = 0;
++  let best: CatalogModelInfo | undefined;
++  for (const candidate of candidates()) {
++    const score = matchScore(local, candidate.remoteId);
++    if (score > bestScore) {
++      bestScore = score;
++      best = candidate.info;
++    }
++  }
++  return best;
++}
++
++function modelIdCandidates(modelId: string): string[] {
++  const trimmed = modelId.trim().toLowerCase();
++  const candidates = new Set<string>([trimmed]);
++  const slash = trimmed.indexOf("/");
++  if (slash >= 0 && slash < trimmed.length - 1) candidates.add(trimmed.slice(slash + 1));
++  const colon = trimmed.lastIndexOf(":");
++  if (colon > 0) candidates.add(trimmed.slice(0, colon));
++  return [...candidates];
++}
++
++function matchScore(candidates: readonly string[], remote: string): number {
++  const normalized = remote.trim().toLowerCase();
++  if (!normalized) return 0;
++  const bare = normalized.includes("/")
++    ? normalized.slice(normalized.lastIndexOf("/") + 1)
++    : normalized;
++  let best = 0;
++  for (const candidate of candidates) {
++    if (candidate === normalized) best = Math.max(best, 300);
++    else if (candidate === bare) best = Math.max(best, 250);
++    else if (normalized.endsWith(`/${candidate}`)) best = Math.max(best, 220);
++    else if (candidate.endsWith(`/${bare}`)) best = Math.max(best, 200);
++  }
++  return best;
++}
++
++export function reasoningLevelsFromOptions(value: unknown): readonly string[] | undefined {
++  if (!Array.isArray(value)) return undefined;
++  const levels: string[] = [];
++  for (const item of value) {
++    if (!item || typeof item !== "object") continue;
++    const record = item as Record<string, unknown>;
++    if (record.type === "budget_tokens") return undefined;
++    if (record.type === "toggle") {
++      pushLevel(levels, "disabled");
++      continue;
++    }
++    for (const level of mapReasoningLevels(arrayOfStrings(record.values)) ?? [])
++      pushLevel(levels, level);
++  }
++  return levels.length > 0 ? levels : undefined;
++}
++
++export function reasoningLevelsFromOpenRouter(value: unknown): readonly string[] | undefined {
++  if (!value || typeof value !== "object") return undefined;
++  return mapReasoningLevels(
++    arrayOfStrings((value as { supported_efforts?: unknown }).supported_efforts),
++  );
++}
++
++export function mapReasoningLevels(values: readonly string[]): readonly string[] | undefined {
++  const levels: string[] = [];
++  for (const value of values) {
++    const mapped = mapReasoningLevel(value);
++    if (mapped) pushLevel(levels, mapped);
++  }
++  return levels.length > 0 ? levels : undefined;
++}
++
++function mapReasoningLevel(value: string): string | undefined {
++  switch (value.trim().toLowerCase()) {
++    case "none":
++    case "off":
++    case "disabled":
++      return "disabled";
++    case "minimal":
++    case "low":
++    case "medium":
++    case "high":
++    case "max":
++    case "ultra":
++    case "enabled":
++      return value.trim().toLowerCase();
++    case "xhigh":
++    case "very_high":
++    case "veryhigh":
++      return "xhigh";
++    case "maximum":
++      return "max";
++    default:
++      return ZCODE_REASONING_LEVELS.includes(
++        value.trim().toLowerCase() as (typeof ZCODE_REASONING_LEVELS)[number],
++      )
++        ? value.trim().toLowerCase()
++        : undefined;
++  }
++}
++
++function pushLevel(levels: string[], level: string): void {
++  if (!levels.includes(level)) levels.push(level);
++}
++
++export function modelEntries(payload: unknown): unknown[] {
++  if (Array.isArray(payload)) return payload;
++  if (!payload || typeof payload !== "object") return [];
++  const record = payload as Record<string, unknown>;
++  if (Array.isArray(record.data)) return record.data;
++  if (Array.isArray(record.models)) return record.models;
++  return [];
++}
++
++export function readId(entry: unknown): string | undefined {
++  if (typeof entry === "string") {
++    const modelId = entry.trim();
++    return modelId || undefined;
++  }
++  if (!entry || typeof entry !== "object" || !("id" in entry)) return undefined;
++  return typeof entry.id === "string" && entry.id.trim() ? entry.id.trim() : undefined;
++}
++
++export function inputModalities(value: unknown): string[] | undefined {
++  const items = arrayOfStrings(nested(value, "input"));
++  return items.length > 0 ? items : undefined;
++}
++
++export function modalityWords(value: string | undefined): string[] {
++  if (!value) return [];
++  return value
++    .toLowerCase()
++    .split(/[^a-z]+/)
++    .filter((item) => item === "image" || item === "video" || item === "audio" || item === "pdf");
++}
++
++export function hasParameter(value: unknown, names: readonly string[]): boolean {
++  const parameters = arrayOfStrings(value);
++  return parameters.some((item) => names.includes(item));
++}
++
++export function nested(value: unknown, key: string): unknown {
++  if (!value || typeof value !== "object") return undefined;
++  return (value as Record<string, unknown>)[key];
++}
++
++export function nestedString(value: unknown, key: string): string | undefined {
++  const child = nested(value, key);
++  return typeof child === "string" ? child : undefined;
++}
++
++export function nestedNumber(value: unknown, key: string): number | undefined {
++  return numberValue(nested(value, key));
++}
++
++export function nestedArray(value: unknown, key: string): unknown[] | undefined {
++  const child = nested(value, key);
++  return Array.isArray(child) ? child : undefined;
++}
++
++export function numberValue(value: unknown): number | undefined {
++  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
++}
++
++export function positiveInt(value: number | undefined): number | undefined {
++  if (value == null || !Number.isInteger(value) || value <= 0) return undefined;
++  return value;
++}
++
++export function arrayOfStrings(value: unknown): string[] {
++  if (!Array.isArray(value)) return [];
++  return value.filter((item): item is string => typeof item === "string");
++}
+diff --git a/packages/services/src/model-provider/providerFacadeServices.ts b/packages/services/src/model-provider/providerFacadeServices.ts
+index 1d9e12ee..f6fcaadf 100644
+--- a/packages/services/src/model-provider/providerFacadeServices.ts
++++ b/packages/services/src/model-provider/providerFacadeServices.ts
+@@ -1,6 +1,7 @@
+ import type { Event } from "@zcode/rpc";
+ import { ServiceChannels } from "@zcode/shared";
+ import {
++  ModelConfig,
+   type ModelConfigObject,
+   type ModelId,
+   type ModelSelection,
+@@ -12,16 +13,28 @@ import {
+   type ProviderSettingsFacade,
+   type ProviderSettingsCreationResult,
+   type ModelConfigResolution,
+-  type ProviderSettingsView,
+   type RemoteModelCatalogRequest,
+   type RemoteModelCatalogResult,
+   type ResolveModelConfigInput,
+   type SavePersonalModelDraftInput,
++  isApiKeyAccess,
+ } from "@zcode/provider";
+ import { createServiceDescriptor } from "../descriptors.js";
+ import type { ModelConnectivityResult } from "@zcode/shared";
++import type { ProviderSettingsView } from "@zcode/provider";
+ import { createServiceLogger } from "../logger/serviceLogger.js";
+ import type { RemoteModelCatalogExecutor } from "./remoteModelCatalog.js";
++import {
++  fetchProviderRemoteModels,
++  ProviderRemoteModelsError,
++} from "./providerRemoteModels.js";
++import { mergeCatalogModelInfo, modelConfigFromCatalog } from "./modelInfoCatalog.js";
++import {
++  cachedProviderModelInfo,
++  lookupPublicModelInfo,
++  rememberProviderModelInfo,
++  warmupPublicModelCatalogs,
++} from "./modelInfoCatalogFetch.js";
+ 
+ export type {
+   ProviderSettingsProviderView,
+@@ -30,6 +43,16 @@ export type {
+   ProviderSettingsView,
+ } from "@zcode/provider";
+ 
++export interface ProviderSettingsRemoteModelsListResult {
++  readonly modelIds: readonly string[];
++}
++
++export interface ProviderSettingsRemoteModelsImportResult {
++  readonly view: ProviderSettingsView;
++  readonly addedCount: number;
++  readonly restoredCount: number;
++}
++
+ export interface IProviderSettingsService {
+   readonly onDidChange: Event<ProviderSettingsView>;
+   getView(): Promise<ProviderSettingsView>;
+@@ -61,6 +84,12 @@ export interface IProviderSettingsService {
+     nextModelId: ModelId,
+   ): Promise<ProviderSettingsView>;
+   deletePersonalModel(providerId: ProviderId, modelId: ModelId): Promise<ProviderSettingsView>;
++  listRemoteProviderModels(providerId: ProviderId): Promise<ProviderSettingsRemoteModelsListResult>;
++  importRemoteProviderModels(
++    providerId: ProviderId,
++    modelIds: readonly string[],
++  ): Promise<ProviderSettingsRemoteModelsImportResult>;
++  clearProviderModels(providerId: ProviderId): Promise<ProviderSettingsView>;
+   savePersonalModelDraft(input: SavePersonalModelDraftInput): Promise<ProviderSettingsView>;
+   setPersonalModelEnabled(
+     providerId: ProviderId,
+@@ -133,7 +162,17 @@ export function createProviderSettingsService(
+     },
+     resolveModelConfig: async (input) => {
+       await ensureReady();
+-      return facade.resolveModelConfig(input);
++      const resolution = facade.resolveModelConfig(input);
++      const patch = await catalogPatchForModel(facade, input.providerId, input.modelId);
++      if (!patch) return resolution;
++      const inheritedConfig = ModelConfig.fromData(resolution.inheritedConfig).overlay(patch).toJSON();
++      const effectiveConfig =
++        "personalConfig" in input
++          ? ModelConfig.fromData(inheritedConfig)
++              .overlay(ModelConfig.fromData(input.personalConfig))
++              .toJSON()
++          : ModelConfig.fromData(resolution.effectiveConfig).overlay(patch).toJSON();
++      return { ...resolution, inheritedConfig, effectiveConfig };
+     },
+     savePersonalProviderOverlay: async (providerId, config, metadata) => {
+       await ensureReady();
+@@ -163,9 +202,49 @@ export function createProviderSettingsService(
+       await ensureReady();
+       return facade.deletePersonalModel(providerId, modelId);
+     },
++    listRemoteProviderModels: async (providerId) => {
++      await ensureReady();
++      await facade.waitForProviderOperations(providerId);
++      const provider = facade.getView().providers.find((item) => item.providerId === providerId);
++      if (!provider) {
++        throw new ProviderRemoteModelsError("missing-connection", `Provider 不存在: ${providerId}`);
++      }
++      const api = provider.effectiveConfig.api;
++      const access = provider.effectiveConfig.access;
++      if (!api?.baseUrl?.trim() || access?.type !== "api-key" || !access.apiKey?.trim()) {
++        throw new ProviderRemoteModelsError("missing-connection", "请先填写 Base URL 和 API Key");
++      }
++      const listed = await fetchProviderRemoteModels({
++        apiType: api.type ?? undefined,
++        baseUrl: api.baseUrl,
++        apiKey: access.apiKey,
++        headers: api.headers,
++      });
++      rememberProviderModelInfo(providerId, listed.info);
++      void warmupPublicModelCatalogs();
++      return { modelIds: listed.modelIds };
++    },
++    importRemoteProviderModels: async (providerId, modelIds) => {
++      await ensureReady();
++      const modelConfigs = await catalogConfigsForModels(facade, providerId, modelIds);
++      const imported = await facade.importRemoteModels(providerId, modelIds, modelConfigs);
++      return {
++        view: imported.view,
++        addedCount: imported.addedModelIds.length,
++        restoredCount: imported.restoredInheritedModelIds.length,
++      };
++    },
++    clearProviderModels: async (providerId) => {
++      await ensureReady();
++      return facade.clearVisibleModels(providerId);
++    },
+     savePersonalModelDraft: async (input) => {
+       await ensureReady();
+-      return facade.savePersonalModelDraft(input);
++      const patch = await catalogPatchForModel(facade, input.providerId, input.nextModelId);
++      const personalConfig = patch
++        ? patch.overlay(ModelConfig.fromData(input.personalConfig)).toJSON()
++        : input.personalConfig;
++      return facade.savePersonalModelDraft({ ...input, personalConfig });
+     },
+     setPersonalModelEnabled: async (providerId, modelId, enabled) => {
+       await ensureReady();
+@@ -282,3 +361,35 @@ function toEvent<T>(subscribe: (listener: (event: T) => void) => () => void): Ev
+     return { dispose };
+   };
+ }
++
++async function catalogConfigsForModels(
++  facade: ProviderSettingsFacade,
++  providerId: string,
++  modelIds: readonly string[],
++): Promise<Record<string, ModelConfig>> {
++  const configs: Record<string, ModelConfig> = {};
++  await Promise.all(
++    modelIds.map(async (modelId) => {
++      const patch = await catalogPatchForModel(facade, providerId, modelId);
++      if (patch) configs[modelId] = patch;
++    }),
++  );
++  return configs;
++}
++
++async function catalogPatchForModel(
++  facade: ProviderSettingsFacade,
++  providerId: string,
++  modelId: string,
++): Promise<ModelConfig | undefined> {
++  const trimmed = modelId.trim();
++  if (!trimmed) return undefined;
++  const specific = facade.resolveSpecificBuiltinModelConfig({
++    providerId,
++    modelId: trimmed,
++  });
++  const providerInfo = cachedProviderModelInfo(providerId, trimmed);
++  const publicInfo = await lookupPublicModelInfo(trimmed);
++  const info = publicInfo ? mergeCatalogModelInfo(providerInfo, publicInfo) : providerInfo;
++  return modelConfigFromCatalog(specific, info);
++}
+diff --git a/packages/services/src/model-provider/providerRemoteModels.ts b/packages/services/src/model-provider/providerRemoteModels.ts
+new file mode 100644
+index 00000000..08a7ef99
+--- /dev/null
++++ b/packages/services/src/model-provider/providerRemoteModels.ts
+@@ -0,0 +1,105 @@
++import type { ModelId, ProviderApiType } from "@zcode/provider";
++import { normalizeApiKeyForHeader } from "../providers/api/apiKeyHeaders.js";
++import { parseProviderModelCatalog, type CatalogModelInfo } from "./modelInfoCatalog.js";
++
++const ANTHROPIC_VERSION = "2023-06-01";
++
++export class ProviderRemoteModelsError extends Error {
++  readonly code: "missing-connection" | "http-error" | "invalid-response";
++
++  constructor(code: ProviderRemoteModelsError["code"], message: string) {
++    super(message);
++    this.name = "ProviderRemoteModelsError";
++    this.code = code;
++  }
++}
++
++export function resolveProviderModelsUrl(apiType: ProviderApiType | undefined, baseUrl: string): string {
++  const trimmed = baseUrl.trim().replace(/\/+$/, "");
++  if (!trimmed) throw new ProviderRemoteModelsError("missing-connection", "Base URL 不能为空");
++  if (/\/models$/i.test(trimmed)) return trimmed;
++  if (apiType === "anthropic-messages") {
++    return /\/v1$/i.test(trimmed) ? `${trimmed}/models` : `${trimmed}/v1/models`;
++  }
++  return `${trimmed}/models`;
++}
++
++export function parseProviderRemoteModelIds(payload: unknown): ModelId[] {
++  return parseProviderModelCatalog(payload).modelIds;
++}
++
++export function parseProviderRemoteModelCatalog(payload: unknown): {
++  readonly modelIds: readonly ModelId[];
++  readonly info: Readonly<Record<string, CatalogModelInfo>>;
++} {
++  return parseProviderModelCatalog(payload);
++}
++
++export function buildProviderModelsRequestHeaders(input: {
++  readonly apiType?: ProviderApiType;
++  readonly apiKey: string;
++  readonly headers?: Readonly<Record<string, string>> | null;
++}): Headers {
++  const apiKey = normalizeApiKeyForHeader(input.apiKey);
++  if (!apiKey) throw new ProviderRemoteModelsError("missing-connection", "API Key 不能为空");
++  const headers = new Headers(input.headers ?? undefined);
++  if (input.apiType === "anthropic-messages") {
++    if (!headers.has("x-api-key")) headers.set("x-api-key", apiKey);
++    if (!headers.has("anthropic-version")) headers.set("anthropic-version", ANTHROPIC_VERSION);
++  } else if (!headers.has("authorization")) {
++    headers.set("Authorization", `Bearer ${apiKey}`);
++  }
++  if (!headers.has("accept")) headers.set("Accept", "application/json");
++  return headers;
++}
++
++export async function fetchProviderRemoteModels(input: {
++  readonly apiType?: ProviderApiType;
++  readonly baseUrl: string;
++  readonly apiKey: string;
++  readonly headers?: Readonly<Record<string, string>> | null;
++  readonly fetchImpl?: typeof fetch;
++  readonly signal?: AbortSignal;
++}): Promise<{
++  readonly modelIds: readonly ModelId[];
++  readonly info: Readonly<Record<string, CatalogModelInfo>>;
++}> {
++  const fetchImpl = input.fetchImpl ?? globalThis.fetch;
++  let response: Response;
++  try {
++    const url = resolveProviderModelsUrl(input.apiType, input.baseUrl);
++    const headers = buildProviderModelsRequestHeaders(input);
++    response = await fetchImpl(url, {
++      method: "GET",
++      headers,
++      ...(input.signal ? { signal: input.signal } : {}),
++    });
++  } catch (error) {
++    if (error instanceof ProviderRemoteModelsError) throw error;
++    // Node 构造 headers 或请求失败时，异常可能回显连接地址或请求头中的凭据。
++    throw new ProviderRemoteModelsError("http-error", "远端模型列表请求失败");
++  }
++  if (!response.ok) {
++    throw new ProviderRemoteModelsError(
++      "http-error",
++      `远端模型列表请求失败（HTTP ${response.status}）`,
++    );
++  }
++  let payload: unknown;
++  try {
++    payload = await response.json();
++  } catch {
++    throw new ProviderRemoteModelsError("invalid-response", "远端返回的模型列表不是 JSON");
++  }
++  const catalog = parseProviderRemoteModelCatalog(payload);
++  if (catalog.modelIds.length === 0) {
++    throw new ProviderRemoteModelsError("invalid-response", "远端返回的模型列表为空或格式无法识别");
++  }
++  return catalog;
++}
++
++export async function fetchProviderRemoteModelIds(
++  input: Parameters<typeof fetchProviderRemoteModels>[0],
++): Promise<readonly ModelId[]> {
++  return (await fetchProviderRemoteModels(input)).modelIds;
++}
+diff --git a/packages/services/src/model-provider/providerRuntime.ts b/packages/services/src/model-provider/providerRuntime.ts
+index 698d80e5..0ce746ef 100644
+--- a/packages/services/src/model-provider/providerRuntime.ts
++++ b/packages/services/src/model-provider/providerRuntime.ts
+@@ -164,6 +164,10 @@ function createSettingsMutationTarget(
+       configService.renamePersonalModel(providerId, currentModelId, nextModelId, membership),
+     deletePersonalModel: (providerId, modelId, membership) =>
+       configService.deletePersonalModel(providerId, modelId, membership),
++    importRemoteModels: (providerId, modelIds, membership, modelConfigs) =>
++      configService.importRemoteModels(providerId, modelIds, membership, modelConfigs),
++    clearVisibleModels: (providerId, membership) =>
++      configService.clearVisibleModels(providerId, membership),
+     setPersonalModelEnabled: (providerId, modelId, enabled, membership) =>
+       configService.setPersonalModelEnabled(providerId, modelId, enabled, membership),
+     savePersonalModelDraft: (
+diff --git a/packages/services/test/remoteModelCatalog.test.ts b/packages/services/test/remoteModelCatalog.test.ts
+index 80c23bef..23b7c534 100644
+--- a/packages/services/test/remoteModelCatalog.test.ts
++++ b/packages/services/test/remoteModelCatalog.test.ts
+@@ -6,6 +6,35 @@ import {
+   type RemoteModelCatalogRequest,
+ } from "@zcode/provider";
+ import { createRemoteModelCatalogExecutor } from "../src/model-provider/remoteModelCatalog.js";
++import { fetchProviderRemoteModels } from "../src/model-provider/providerRemoteModels.js";
++
++test("已保存连接的模型列表请求不会向界面回显凭据", async () => {
++  const input = {
++    baseUrl: "https://gateway.example/v1",
++    apiKey: "fixture-key",
++    headers: { "X-Token": "fixture-header" },
++  };
++  await assert.rejects(
++    fetchProviderRemoteModels({
++      ...input,
++      fetchImpl: async () => {
++        throw new Error("fixture-key fixture-header");
++      },
++    }),
++    { code: "http-error", message: "远端模型列表请求失败" },
++  );
++  await assert.rejects(
++    fetchProviderRemoteModels({ ...input, headers: { "X-Token": "fixture-header\ninvalid" } }),
++    { code: "http-error", message: "远端模型列表请求失败" },
++  );
++  await assert.rejects(
++    fetchProviderRemoteModels({
++      ...input,
++      fetchImpl: async () => new Response(null, { status: 401 }),
++    }),
++    { code: "http-error", message: "远端模型列表请求失败（HTTP 401）" },
++  );
++});
+ 
+ function openAiRequest(overrides: Partial<RemoteModelCatalogRequest> = {}) {
+   return {
+diff --git a/packages/ui/src/hooks/useModelProviders.ts b/packages/ui/src/hooks/useModelProviders.ts
+index 76223447..907b0188 100644
+--- a/packages/ui/src/hooks/useModelProviders.ts
++++ b/packages/ui/src/hooks/useModelProviders.ts
+@@ -141,6 +141,31 @@ export function useModelProviders(target: {
+     [commitProviderSettingsView, providerSettingsService],
+   );
+ 
++  // Hook 只公开 UI 消费的模型 ID 和操作完成信号，避免声明引用服务实现文件。
++  const listRemoteProviderModels = useCallback(
++    async (providerId: string): Promise<readonly string[]> => {
++      const result = await providerSettingsService.listRemoteProviderModels(providerId);
++      return result.modelIds;
++    },
++    [providerSettingsService],
++  );
++
++  const importRemoteProviderModels = useCallback(
++    async (providerId: string, modelIds: readonly string[]): Promise<void> => {
++      const result = await providerSettingsService.importRemoteProviderModels(providerId, modelIds);
++      commitProviderSettingsView(result.view);
++    },
++    [commitProviderSettingsView, providerSettingsService],
++  );
++
++  const clearProviderModels = useCallback(
++    async (providerId: string): Promise<void> => {
++      const view = await providerSettingsService.clearProviderModels(providerId);
++      commitProviderSettingsView(view);
++    },
++    [commitProviderSettingsView, providerSettingsService],
++  );
++
+   const deleteProvider = useCallback(
+     async (id: string) => {
+       const view = await persistPersonalProviderDeletion({
+@@ -228,6 +253,9 @@ export function useModelProviders(target: {
+     savePersonalModelDraft,
+     setPersonalModelEnabled,
+     deletePersonalModel,
++    listRemoteProviderModels,
++    importRemoteProviderModels,
++    clearProviderModels,
+     deleteProvider,
+     reorderProviderModels,
+     saveDisplayOrder,
+diff --git a/packages/ui/src/settings/ModelProviderSection.tsx b/packages/ui/src/settings/ModelProviderSection.tsx
+index edd104f4..57ff819e 100644
+--- a/packages/ui/src/settings/ModelProviderSection.tsx
++++ b/packages/ui/src/settings/ModelProviderSection.tsx
+@@ -262,6 +262,9 @@ export function ModelProviderSection({
+     savePersonalModelDraft,
+     setPersonalModelEnabled,
+     deletePersonalModel,
++    listRemoteProviderModels,
++    importRemoteProviderModels,
++    clearProviderModels,
+     deleteProvider,
+     reorderProviderModels,
+     saveDisplayOrder,
+@@ -1131,6 +1134,9 @@ export function ModelProviderSection({
+           onSavePersonalModelDraft={savePersonalModelDraft}
+           onSetPersonalModelEnabled={setPersonalModelEnabled}
+           onDeletePersonalModel={deletePersonalModel}
++          onListRemoteModels={listRemoteProviderModels}
++          onImportRemoteModels={importRemoteProviderModels}
++          onClearModels={clearProviderModels}
+           onDelete={handleDelete}
+           // Provider 的左栏排序权限被误复用成模型排序门禁，导致 Built-in / Account
+           // Provider 的 Effective 模型无法写入 Personal modelOrder。模型调序独立于成员来源。
+diff --git a/packages/ui/src/settings/model-provider-section/Detail.tsx b/packages/ui/src/settings/model-provider-section/Detail.tsx
+index 71d1bf0f..061f7d70 100644
+--- a/packages/ui/src/settings/model-provider-section/Detail.tsx
++++ b/packages/ui/src/settings/model-provider-section/Detail.tsx
+@@ -253,6 +253,9 @@ export function ModelProviderSectionDetail({
+   onSavePersonalModelDraft,
+   onSetPersonalModelEnabled,
+   onDeletePersonalModel,
++  onListRemoteModels,
++  onImportRemoteModels,
++  onClearModels,
+   onDelete,
+   onReorderProviderModels,
+   onTestModel,
+@@ -292,6 +295,9 @@ export function ModelProviderSectionDetail({
+     enabled: boolean,
+   ) => Promise<unknown>;
+   onDeletePersonalModel?: (providerId: string, modelId: string) => Promise<unknown>;
++  onListRemoteModels?: (providerId: string) => Promise<readonly string[]>;
++  onImportRemoteModels?: (providerId: string, modelIds: readonly string[]) => Promise<void>;
++  onClearModels?: (providerId: string) => Promise<void>;
+   onDelete: (provider: ProviderSettingsFormProvider) => Promise<void>;
+   onReorderProviderModels?: (providerId: string, modelIds: string[]) => Promise<void>;
+   onTestModel: (providerId: string, modelId: string) => Promise<ModelConnectivityResult>;
+@@ -859,6 +865,9 @@ export function ModelProviderSectionDetail({
+       provider={customProvider}
+       onSave={onSave}
+       {...modelEditingProps}
++      onListRemoteModels={onListRemoteModels}
++      onImportRemoteModels={onImportRemoteModels}
++      onClearModels={onClearModels}
+       onDelete={() => onDelete(customProvider)}
+       onReorderModelIds={
+         onReorderProviderModels
+diff --git a/packages/ui/src/settings/model-provider-section/InlineEditableProviderCard.tsx b/packages/ui/src/settings/model-provider-section/InlineEditableProviderCard.tsx
+index 33bda856..833a313f 100644
+--- a/packages/ui/src/settings/model-provider-section/InlineEditableProviderCard.tsx
++++ b/packages/ui/src/settings/model-provider-section/InlineEditableProviderCard.tsx
+@@ -145,6 +145,9 @@ export function InlineEditableProviderCard({
+   onSavePersonalModelDraft,
+   onSetPersonalModelEnabled,
+   onDeletePersonalModel,
++  onListRemoteModels,
++  onImportRemoteModels,
++  onClearModels,
+   onDelete,
+   onTestModel,
+   onReorderModelIds,
+@@ -173,6 +176,9 @@ export function InlineEditableProviderCard({
+     enabled: boolean,
+   ) => Promise<unknown>;
+   onDeletePersonalModel?: (providerId: string, modelId: string) => Promise<unknown>;
++  onListRemoteModels?: (providerId: string) => Promise<readonly string[]>;
++  onImportRemoteModels?: (providerId: string, modelIds: readonly string[]) => Promise<void>;
++  onClearModels?: (providerId: string) => Promise<void>;
+   onDelete?: () => void | Promise<void>;
+   onTestModel?: (providerId: string, modelId: string) => Promise<ModelConnectivityResult>;
+   onReorderModelIds?: (modelIds: string[]) => Promise<void>;
+@@ -679,28 +685,21 @@ export function InlineEditableProviderCard({
+ 
+   const handleDeleteModel = useCallback(
+     (modelId: string) => {
+-      const index = models.findIndex((model) => model.modelId === modelId);
+-      const model = models[index];
+-      if (!model) {
+-        return;
+-      }
+-      if (!model.builtin) {
+-        void runSaveOperation(
+-          async () => {
+-            if (!onDeletePersonalModel)
+-              throw new Error("当前设置入口未装配 Personal Model 删除能力");
+-            await onDeletePersonalModel(provider.providerId, model.modelId);
+-          },
+-          { modelId: model.modelId, operation: "delete" },
+-        ).catch((error) => {
+-          logger.warn("[ModelProviderSection] 删除 Personal Model 失败", {
+-            providerId: provider.providerId,
+-            modelId: model.modelId,
+-            error,
+-          });
++      const model = models.find((candidate) => candidate.modelId === modelId);
++      if (!model) return;
++      void runSaveOperation(
++        async () => {
++          if (!onDeletePersonalModel) throw new Error("当前设置入口未装配 Model 删除能力");
++          await onDeletePersonalModel(provider.providerId, model.modelId);
++        },
++        { modelId: model.modelId, operation: "delete" },
++      ).catch((error) => {
++        logger.warn("[ModelProviderSection] 删除 Model 失败", {
++          providerId: provider.providerId,
++          modelId: model.modelId,
++          error,
+         });
+-        return;
+-      }
++      });
+     },
+     [models, onDeletePersonalModel, provider.providerId, runSaveOperation],
+   );
+@@ -772,6 +771,17 @@ export function InlineEditableProviderCard({
+             ...(provider.config.api?.headers ? { headers: provider.config.api.headers } : {}),
+           })
+       : undefined;
++  const canManageSavedModels = isApiKeyProvider && provider.config.group === "standard-personal";
++  const fetchSavedRemoteModels =
++    canManageSavedModels && onListRemoteModels
++      ? () => onListRemoteModels(provider.providerId)
++      : undefined;
++  const importSavedRemoteModels =
++    canManageSavedModels && onImportRemoteModels
++      ? (modelIds: readonly string[]) => onImportRemoteModels(provider.providerId, modelIds)
++      : undefined;
++  const clearSavedModels =
++    canManageSavedModels && onClearModels ? () => onClearModels(provider.providerId) : undefined;
+   // 修复说明：之前只看 statusSection 是否存在，导致自定义 Provider 传余额卡后头部
+   // （名称/开关/重命名/删除）被整体隐藏。这里把"是否替代头部"变成显式开关，调用方决定。
+   const effectiveHeaderVisible =
+@@ -878,6 +888,9 @@ export function InlineEditableProviderCard({
+           onModelCommit={handleModelCommit}
+           onModelEnabledChange={handleModelEnabledChange}
+           onDeleteModel={handleDeleteModel}
++          onListRemoteModels={fetchSavedRemoteModels}
++          onImportRemoteModels={importSavedRemoteModels}
++          onClearModels={clearSavedModels}
+           onAddModel={handleAddModel}
+           onReorderModelIds={onReorderModelIds ? handleReorderModelIds : undefined}
+           settingsRevision={settingsRevision ?? 0}
+diff --git a/packages/ui/src/settings/model-provider-section/ProviderCardSections.tsx b/packages/ui/src/settings/model-provider-section/ProviderCardSections.tsx
+index 4852b9c2..033b5fc9 100644
+--- a/packages/ui/src/settings/model-provider-section/ProviderCardSections.tsx
++++ b/packages/ui/src/settings/model-provider-section/ProviderCardSections.tsx
+@@ -1,6 +1,7 @@
+ /* eslint-disable max-lines -- 模型供应商卡片仍在迁移期集中维护多个紧耦合区块，后续拆分时再移除。 */
+ import {
+   useCallback,
++  useMemo,
+   useRef,
+   useState,
+   type KeyboardEvent as ReactKeyboardEvent,
+@@ -23,7 +24,7 @@ import {
+   TID_MODEL_PROVIDER_NAME_INPUT,
+   testId,
+ } from "@zcode/shared";
+-import { InfoIcon, LockKeyholeIcon, Plus, Pencil, Trash2, MoreHorizontal } from "lucide-react";
++import { InfoIcon, LockKeyholeIcon, Plus, Pencil, Trash2, MoreHorizontal, Download } from "lucide-react";
+ import { Button } from "@/components/ui/button.js";
+ import { Input } from "@/components/ui/input.js";
+ import {
+@@ -34,6 +35,7 @@ import {
+   DropdownMenuSeparator,
+ } from "@/components/ui/dropdown-menu.js";
+ import { useZCodeIntl } from "@/i18n/IntlProvider.js";
++import { useConfirmDialog } from "@/hooks/useConfirmDialog.js";
+ import { useServices } from "@/hooks/useServices.js";
+ import { TECHNICAL_INPUT_ATTRIBUTES } from "@/lib/technicalInputAttributes.js";
+ import { ApiKeyInput } from "./ApiKeyInput.js";
+@@ -43,6 +45,7 @@ import { resolveOrcaDiscoverySurface } from "./orcaRouterModelOptions.js";
+ import { PresetProviderApiKeyBanner } from "./PresetProviderApiKeyBanner.js";
+ import { type ProviderModelDraftValues } from "@/settings/model-provider-section/ProviderModelMetadata.js";
+ import { ProviderModelMetadataDialog } from "@/settings/model-provider-section/ProviderModelMetadataDialog.js";
++import { ProviderRemoteModelsDialog } from "@/settings/model-provider-section/ProviderRemoteModelsDialog.js";
+ import {
+   PROVIDER_CONNECTION_API_FORMATS,
+   ProviderApiFormatSelect,
+@@ -366,6 +369,9 @@ export function ProviderModelsSection({
+   onAddModel,
+   onReorderModelIds,
+   settingsRevision = 0,
++  onListRemoteModels,
++  onImportRemoteModels,
++  onClearModels,
+   onDetectRemoteModels,
+   discoveryTemplateId = null,
+   discoveryCapability = "chat",
+@@ -386,7 +392,10 @@ export function ProviderModelsSection({
+   onAddModel: (model: ProviderSettingsFormModel) => void | Promise<void>;
+   onReorderModelIds?: (modelIds: string[]) => void;
+   settingsRevision?: number;
+-  /** 装配后对话框内出现"检测可用模型"入口；未装配（账号/套餐 Provider）则保持手输。 */
++  onListRemoteModels?: () => Promise<readonly string[]>;
++  onImportRemoteModels?: (modelIds: readonly string[]) => void | Promise<void>;
++  onClearModels?: () => void | Promise<void>;
++  /** 装配后对话框内出现"检测可用模型"入口；未装配时保持手输。 */
+   onDetectRemoteModels?: () => Promise<RemoteModelCatalogResult>;
+   /** OrcaRouter 模板：模型只能从真实目录生成的下拉中选择，不支持自由输入。 */
+   discoveryTemplateId?: string | null;
+@@ -399,12 +408,19 @@ export function ProviderModelsSection({
+   discoveryCapability?: OrcaCapability;
+ }) {
+   const { intl } = useZCodeIntl();
++  const confirmDialog = useConfirmDialog();
+   const { providerSettingsService } = useServices();
+   const [addDialogOpen, setAddDialogOpen] = useState(false);
+   const [addSaving, setAddSaving] = useState(false);
+   const addSavingRef = useRef(false);
+   const [addCommitError, setAddCommitError] = useState<string | null>(null);
+   const [addModel] = useState(createEmptyModel);
++  const [fetchingModels, setFetchingModels] = useState(false);
++  const [remoteModelsDialogOpen, setRemoteModelsDialogOpen] = useState(false);
++  const [remoteModelIds, setRemoteModelIds] = useState<readonly string[]>([]);
++  const [importingModels, setImportingModels] = useState(false);
++  const [clearingModels, setClearingModels] = useState(false);
++  const [catalogError, setCatalogError] = useState<string | null>(null);
+   const [detectPending, setDetectPending] = useState(false);
+   const [detectError, setDetectError] = useState<string | null>(null);
+   const [detectModels, setDetectModels] = useState<readonly string[] | null>(null);
+@@ -430,6 +446,66 @@ export function ProviderModelsSection({
+   });
+   const { draft: addDraft } = editor;
+ 
++  const handleFetchRemoteModels = useCallback(() => {
++    if (!onListRemoteModels || fetchingModels) return;
++    setFetchingModels(true);
++    setCatalogError(null);
++    void onListRemoteModels()
++      .then((modelIds) => {
++        setRemoteModelIds(modelIds);
++        setRemoteModelsDialogOpen(true);
++      })
++      .catch((error) => {
++        setCatalogError(error instanceof Error ? error.message : String(error));
++      })
++      .finally(() => setFetchingModels(false));
++  }, [fetchingModels, onListRemoteModels]);
++
++  const handleClearModels = useCallback(() => {
++    if (!onClearModels || clearingModels) return;
++    void (async () => {
++      const confirmed = await confirmDialog({
++        title: intl.formatMessage({ id: "settings.modelProvider.clearModelsConfirmTitle" }),
++        description: intl.formatMessage({
++          id: "settings.modelProvider.clearModelsConfirmDescription",
++        }),
++        confirmLabel: intl.formatMessage({ id: "settings.modelProvider.clearModelsConfirmAction" }),
++        cancelLabel: intl.formatMessage({ id: "common.cancel" }),
++        confirmVariant: "destructive",
++      });
++      if (!confirmed) return;
++      setClearingModels(true);
++      setCatalogError(null);
++      try {
++        await onClearModels();
++      } catch (error) {
++        setCatalogError(error instanceof Error ? error.message : String(error));
++      } finally {
++        setClearingModels(false);
++      }
++    })();
++  }, [clearingModels, confirmDialog, intl, onClearModels]);
++
++  const handleImportRemoteModels = useCallback(
++    async (modelIds: readonly string[]) => {
++      if (!onImportRemoteModels || importingModels) return;
++      setImportingModels(true);
++      setCatalogError(null);
++      try {
++        await onImportRemoteModels(modelIds);
++        setRemoteModelsDialogOpen(false);
++        setRemoteModelIds([]);
++      } catch (error) {
++        setCatalogError(error instanceof Error ? error.message : String(error));
++      } finally {
++        setImportingModels(false);
++      }
++    },
++    [importingModels, onImportRemoteModels],
++  );
++
++  const existingModelIds = useMemo(() => new Set(models.map((model) => model.modelId)), [models]);
++
+   const openAddDialog = useCallback(() => {
+     editor.reset(createEmptyModel());
+     setAddDraftErrorField(null);
+@@ -555,19 +631,54 @@ export function ProviderModelsSection({
+         <span className="text-ui-base text-foreground-subtle">
+           {intl.formatMessage({ id: "settings.modelProvider.models" })}
+         </span>
+-        {orcaRouterTemplate ? null : (
+-          <Button
+-            type="button"
+-            variant="secondary"
+-            size="default"
+-            className="rounded-lg"
+-            data-testid={TID_MODEL_PROVIDER_ADD_MODEL_BUTTON}
+-            onClick={openAddDialog}
+-          >
+-            <Plus data-icon="inline-start" aria-hidden="true" />
+-            {intl.formatMessage({ id: "settings.modelProvider.addModel" })}
+-          </Button>
+-        )}
++        <div className="flex flex-wrap items-center gap-2">
++          {onClearModels && models.length > 0 ? (
++            <Button
++              type="button"
++              variant="secondary"
++              size="default"
++              className="rounded-lg"
++              data-provider-clear-models="true"
++              disabled={clearingModels || fetchingModels}
++              onClick={handleClearModels}
++            >
++              <Trash2 data-icon="inline-start" aria-hidden="true" />
++              {intl.formatMessage({ id: "settings.modelProvider.clearModels" })}
++            </Button>
++          ) : null}
++          {onListRemoteModels ? (
++            <Button
++              type="button"
++              variant="secondary"
++              size="default"
++              className="rounded-lg"
++              data-provider-fetch-models="true"
++              disabled={fetchingModels || clearingModels}
++              aria-busy={fetchingModels}
++              onClick={handleFetchRemoteModels}
++            >
++              <Download data-icon="inline-start" aria-hidden="true" />
++              {intl.formatMessage({
++                id: fetchingModels
++                  ? "settings.modelProvider.fetchingModels"
++                  : "settings.modelProvider.fetchModels",
++              })}
++            </Button>
++          ) : null}
++          {orcaRouterTemplate ? null : (
++            <Button
++              type="button"
++              variant="secondary"
++              size="default"
++              className="rounded-lg"
++              data-testid={TID_MODEL_PROVIDER_ADD_MODEL_BUTTON}
++              onClick={openAddDialog}
++            >
++              <Plus data-icon="inline-start" aria-hidden="true" />
++              {intl.formatMessage({ id: "settings.modelProvider.addModel" })}
++            </Button>
++          )}
++        </div>
+       </div>
+       {orcaRouterTemplate ? (
+         <div className="mb-2">
+@@ -580,6 +691,11 @@ export function ProviderModelsSection({
+           />
+         </div>
+       ) : null}
++      {catalogError ? (
++        <div role="alert" className="mt-2 text-ui-sm text-destructive" data-provider-model-error="true">
++          {catalogError}
++        </div>
++      ) : null}
+       {models.length > 0 ? (
+         <div className="overflow-hidden rounded-lg border border-input-border bg-input">
+           <SortableProviderModelList
+@@ -622,7 +738,7 @@ export function ProviderModelsSection({
+                     }
+                     settingsRevision={settingsRevision}
+                     modelIdReadOnly={orcaRouterTemplate}
+-                    onDelete={!model.builtin ? () => onDeleteModel(model.modelId) : undefined}
++                    onDelete={() => onDeleteModel(model.modelId)}
+                     onEnabledChange={(enabled) => {
+                       void Promise.resolve(onModelEnabledChange?.(model.modelId, enabled)).catch(
+                         () => undefined,
+@@ -648,6 +764,14 @@ export function ProviderModelsSection({
+         </div>
+       )}
+       {/* OrcaRouter 的模型只能来自目录下拉，不提供任何自由填写入口（含"检测可用模型"对话框）。 */}
++      <ProviderRemoteModelsDialog
++        open={remoteModelsDialogOpen}
++        remoteModelIds={remoteModelIds}
++        existingModelIds={existingModelIds}
++        saving={importingModels}
++        onOpenChange={setRemoteModelsDialogOpen}
++        onConfirm={handleImportRemoteModels}
++      />
+       {orcaRouterTemplate ? null : (
+         <ProviderModelMetadataDialog
+           onRestore={() => {
+diff --git a/packages/ui/src/settings/model-provider-section/ProviderFormControls.tsx b/packages/ui/src/settings/model-provider-section/ProviderFormControls.tsx
+index ab9013f5..0e0ea017 100644
+--- a/packages/ui/src/settings/model-provider-section/ProviderFormControls.tsx
++++ b/packages/ui/src/settings/model-provider-section/ProviderFormControls.tsx
+@@ -11,6 +11,7 @@ import { ProviderModelMetadataDialog } from "@/settings/model-provider-section/P
+ import { formatModelContextWindowLabel } from "@/lib/tokenNumberFormat.js";
+ import type { ModelConfigResolution, ProviderConfigObject } from "@zcode/provider";
+ import { shouldShowModelVisionBadge } from "@/lib/modelVisionBadge.js";
++import { resolveConnectivityFailureCopy } from "@/lib/modelConnectivityFailure.js";
+ import { useProviderDetailFeedback } from "@/settings/model-provider-section/ProviderDetailFeedback.js";
+ 
+ export function ModelRowInput({
+@@ -169,12 +170,11 @@ export function ModelRowInput({
+           dismissLabel: intl.formatMessage({ id: "common.close" }),
+         });
+       } else {
++        const failureCopy = resolveConnectivityFailureCopy(result.error);
+         const localizedReason =
+-          result.error.code === "provider-unavailable"
+-            ? intl.formatMessage({ id: "settings.modelProvider.testModel.providerUnavailable" })
+-            : result.error.code === "model-unavailable"
+-              ? intl.formatMessage({ id: "settings.modelProvider.testModel.modelUnavailable" })
+-              : result.error.message.trim();
++          "messageId" in failureCopy
++            ? intl.formatMessage({ id: failureCopy.messageId })
++            : failureCopy.raw;
+         const reason =
+           localizedReason || intl.formatMessage({ id: "settings.modelProvider.testModel.failed" });
+         showFeedback({
+@@ -190,6 +190,9 @@ export function ModelRowInput({
+         });
+       }
+     } catch (error) {
++      const failureCopy = resolveConnectivityFailureCopy({
++        message: error instanceof Error ? error.message : String(error),
++      });
+       showFeedback({
+         key: dedupeKey,
+         message: intl.formatMessage(
+@@ -198,9 +201,10 @@ export function ModelRowInput({
+             provider: providerName,
+             model: modelId,
+             reason:
+-              error instanceof Error
+-                ? error.message
+-                : intl.formatMessage({ id: "settings.modelProvider.testModel.failed" }),
++              "messageId" in failureCopy
++                ? intl.formatMessage({ id: failureCopy.messageId })
++                : failureCopy.raw ||
++                  intl.formatMessage({ id: "settings.modelProvider.testModel.failed" }),
+           },
+         ),
+         state: "failure",
+diff --git a/packages/ui/src/settings/model-provider-section/ProviderRemoteModelsDialog.tsx b/packages/ui/src/settings/model-provider-section/ProviderRemoteModelsDialog.tsx
+new file mode 100644
+index 00000000..676c22e0
+--- /dev/null
++++ b/packages/ui/src/settings/model-provider-section/ProviderRemoteModelsDialog.tsx
+@@ -0,0 +1,190 @@
++import { useEffect, useMemo, useState } from "react";
++import { Button } from "@/components/ui/button.js";
++import { Checkbox } from "@/components/ui/checkbox.js";
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from "@/components/ui/dialog.js";
++import { Input } from "@/components/ui/input.js";
++import { useZCodeIntl } from "@/i18n/IntlProvider.js";
++
++export function ProviderRemoteModelsDialog({
++  open,
++  remoteModelIds,
++  existingModelIds,
++  saving = false,
++  onOpenChange,
++  onConfirm,
++}: {
++  open: boolean;
++  remoteModelIds: readonly string[];
++  existingModelIds: ReadonlySet<string>;
++  saving?: boolean;
++  onOpenChange: (open: boolean) => void;
++  onConfirm: (modelIds: readonly string[]) => void | Promise<void>;
++}) {
++  const { intl } = useZCodeIntl();
++  const [query, setQuery] = useState("");
++  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
++  const existingRemoteCount = useMemo(
++    () => remoteModelIds.filter((modelId) => existingModelIds.has(modelId)).length,
++    [existingModelIds, remoteModelIds],
++  );
++  const newModelIds = useMemo(
++    () => remoteModelIds.filter((modelId) => !existingModelIds.has(modelId)),
++    [existingModelIds, remoteModelIds],
++  );
++  const visibleModelIds = useMemo(() => {
++    const needle = query.trim().toLocaleLowerCase();
++    if (!needle) return remoteModelIds;
++    return remoteModelIds.filter((modelId) => modelId.toLocaleLowerCase().includes(needle));
++  }, [query, remoteModelIds]);
++  const visibleNewModelIds = visibleModelIds.filter((modelId) => !existingModelIds.has(modelId));
++  const selectedNewCount = newModelIds.filter((modelId) => selectedIds.has(modelId)).length;
++
++  useEffect(() => {
++    if (!open) return;
++    setQuery("");
++    setSelectedIds(new Set());
++  }, [open, remoteModelIds]);
++
++  const toggle = (modelId: string, checked: boolean) => {
++    if (existingModelIds.has(modelId)) return;
++    setSelectedIds((current) => {
++      const next = new Set(current);
++      if (checked) next.add(modelId);
++      else next.delete(modelId);
++      return next;
++    });
++  };
++
++  return (
++    <Dialog
++      open={open}
++      onOpenChange={(nextOpen) => {
++        if (saving) return;
++        if (!nextOpen) {
++          setQuery("");
++          setSelectedIds(new Set());
++        }
++        onOpenChange(nextOpen);
++      }}
++    >
++      <DialogContent
++        className="max-w-lg"
++        data-provider-remote-models-dialog="true"
++        onOpenAutoFocus={(event) => event.preventDefault()}
++      >
++        <DialogHeader>
++          <DialogTitle>
++            {intl.formatMessage({ id: "settings.modelProvider.fetchModelsDialogTitle" })}
++          </DialogTitle>
++          <DialogDescription>
++            {intl.formatMessage(
++              { id: "settings.modelProvider.fetchModelsDialogDescription" },
++              { total: remoteModelIds.length, added: existingRemoteCount },
++            )}
++          </DialogDescription>
++        </DialogHeader>
++        <Input
++          type="search"
++          value={query}
++          onChange={(event) => setQuery(event.target.value)}
++          placeholder={intl.formatMessage({
++            id: "settings.modelProvider.fetchModelsSearchPlaceholder",
++          })}
++        />
++        <div className="flex items-center justify-between gap-2">
++          <span className="text-ui-sm text-foreground-subtle">
++            {intl.formatMessage(
++              { id: "settings.modelProvider.fetchModelsSelectedCount" },
++              { count: selectedNewCount },
++            )}
++          </span>
++          <Button
++            type="button"
++            variant="ghost"
++            size="sm"
++            disabled={visibleNewModelIds.length === 0 || saving}
++            onClick={() => {
++              const allVisibleSelected = visibleNewModelIds.every((modelId) =>
++                selectedIds.has(modelId),
++              );
++              setSelectedIds((current) => {
++                const next = new Set(current);
++                for (const modelId of visibleNewModelIds) {
++                  if (allVisibleSelected) next.delete(modelId);
++                  else next.add(modelId);
++                }
++                return next;
++              });
++            }}
++          >
++            {intl.formatMessage({
++              id:
++                visibleNewModelIds.length > 0 &&
++                visibleNewModelIds.every((modelId) => selectedIds.has(modelId))
++                  ? "settings.modelProvider.fetchModelsDeselectVisible"
++                  : "settings.modelProvider.fetchModelsSelectVisible",
++            })}
++          </Button>
++        </div>
++        <div className="max-h-72 overflow-y-auto rounded-lg border border-input-border">
++          {visibleModelIds.length === 0 ? (
++            <div className="px-3 py-6 text-ui-base text-foreground-subtle">
++              {intl.formatMessage({ id: "settings.modelProvider.fetchModelsSearchEmpty" })}
++            </div>
++          ) : (
++            visibleModelIds.map((modelId) => {
++              const existing = existingModelIds.has(modelId);
++              return (
++                <label
++                  key={modelId}
++                  className="flex items-center gap-2 border-b border-border px-3 py-2 last:border-b-0"
++                >
++                  <Checkbox
++                    checked={existing || selectedIds.has(modelId)}
++                    disabled={existing || saving}
++                    onCheckedChange={(checked) => toggle(modelId, checked === true)}
++                  />
++                  <span className="min-w-0 flex-1 truncate font-mono text-ui-base">{modelId}</span>
++                  {existing ? (
++                    <span className="shrink-0 text-ui-xs text-foreground-subtle">
++                      {intl.formatMessage({ id: "settings.modelProvider.fetchModelsAlreadyAdded" })}
++                    </span>
++                  ) : null}
++                </label>
++              );
++            })
++          )}
++        </div>
++        <DialogFooter>
++          <Button
++            type="button"
++            variant="secondary"
++            disabled={saving}
++            onClick={() => onOpenChange(false)}
++          >
++            {intl.formatMessage({ id: "common.cancel" })}
++          </Button>
++          <Button
++            type="button"
++            disabled={saving || selectedNewCount === 0}
++            onClick={() => {
++              void onConfirm(newModelIds.filter((modelId) => selectedIds.has(modelId)));
++            }}
++          >
++            {intl.formatMessage(
++              { id: "settings.modelProvider.fetchModelsConfirm" },
++              { count: selectedNewCount },
++            )}
++          </Button>
++        </DialogFooter>
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/packages/ui/test/useModelProviders.test.ts b/packages/ui/test/useModelProviders.test.ts
+index 6e9268ab..6e0dbc22 100644
+--- a/packages/ui/test/useModelProviders.test.ts
++++ b/packages/ui/test/useModelProviders.test.ts
+@@ -324,6 +324,66 @@ describe("useModelProviders", () => {
+     expect(hook.result.current.modelProviders).toHaveLength(0);
+   });
+ 
++  it("读取已保存连接的模型列表，并在导入和清空时提交 Host 返回的 View", async () => {
++    const initialView = createProviderSettingsView(["provider-a"], 1);
++    const importedView = createProviderSettingsView(["provider-a"], 2);
++    const clearedView = createProviderSettingsView(["provider-a"], 3);
++    const service = {
++      getView: vi.fn(async () => initialView),
++      onDidChange: vi.fn(() => ({ dispose: vi.fn() })),
++      listRemoteProviderModels: vi.fn(async () => ({ modelIds: ["remote-a", "remote-b"] })),
++      importRemoteProviderModels: vi.fn(async () => ({
++        view: importedView,
++        addedCount: 1,
++        restoredCount: 0,
++      })),
++      clearProviderModels: vi.fn(async () => clearedView),
++    } satisfies Pick<
++      IProviderSettingsService,
++      | "getView"
++      | "onDidChange"
++      | "listRemoteProviderModels"
++      | "importRemoteProviderModels"
++      | "clearProviderModels"
++    >;
++    const wrapper = ({ children }: { children: ReactNode }) =>
++      ServiceProvider({
++        services: { providerSettingsService: service } as never,
++        children,
++      });
++    const hook = renderHook(() => useModelProviders({ workspacePath: "/local/workspace" }), {
++      wrapper,
++    });
++
++    await waitFor(() => expect(hook.result.current.providerSettingsView).toBe(initialView));
++    await expect(hook.result.current.listRemoteProviderModels("provider-a")).resolves.toEqual([
++      "remote-a",
++      "remote-b",
++    ]);
++    expect(service.listRemoteProviderModels).toHaveBeenCalledWith("provider-a");
++    expect(hook.result.current.providerSettingsView).toBe(initialView);
++
++    await act(async () => {
++      await expect(
++        hook.result.current.importRemoteProviderModels("provider-a", ["remote-b"]),
++      ).resolves.toBeUndefined();
++    });
++    expect(service.importRemoteProviderModels).toHaveBeenCalledWith("provider-a", ["remote-b"]);
++    expect(hook.result.current.providerSettingsView).toBe(importedView);
++
++    await act(async () => {
++      await expect(hook.result.current.clearProviderModels("provider-a")).resolves.toBeUndefined();
++    });
++    expect(service.clearProviderModels).toHaveBeenCalledWith("provider-a");
++    expect(hook.result.current.providerSettingsView).toBe(clearedView);
++
++    service.clearProviderModels.mockRejectedValueOnce(new Error("clear rejected"));
++    await expect(hook.result.current.clearProviderModels("provider-a")).rejects.toThrow(
++      "clear rejected",
++    );
++    expect(hook.result.current.providerSettingsView).toBe(clearedView);
++  });
++
+   it("手动刷新提交返回的最新 View，而不是仅等待远端事件", async () => {
+     let currentView = createProviderSettingsView(["before-refresh"], 1);
+     const service = {
+diff --git a/packages/ui/test/browser/manual-review/pending/provider-settings-batch.fixture.tsx b/packages/ui/test/browser/manual-review/pending/provider-settings-batch.fixture.tsx
+index f6cce303..2acc78ee 100644
+--- a/packages/ui/test/browser/manual-review/pending/provider-settings-batch.fixture.tsx
++++ b/packages/ui/test/browser/manual-review/pending/provider-settings-batch.fixture.tsx
+@@ -5,6 +5,7 @@ import type { IServiceAccessor, ProviderSettingsView } from "@zcode/services";
+ import { ZCodeIntlProvider } from "@/i18n/IntlProvider.js";
+ import { ServiceProvider } from "@/hooks/useServices.js";
+ import { TooltipProvider } from "@/components/ui/tooltip.js";
++import { ConfirmDialogHost } from "@/ConfirmDialog.js";
+ import { ProviderTemplatePicker } from "@/settings/model-provider-section/ProviderTemplatePicker.js";
+ import { ProviderDetailFeedbackBoundary } from "@/settings/model-provider-section/ProviderDetailFeedback.js";
+ import { InlineEditableProviderCard } from "@/settings/model-provider-section/InlineEditableProviderCard.js";
+@@ -226,6 +227,32 @@ function Fixture() {
+                 onAddPersonalModel={async (_id, model) => {
+                   await request("add", model);
+                 }}
++                {...(params.has("remoteModels")
++                  ? {
++                      onListRemoteModels: async (providerId: string) => {
++                        await request("listRemoteModels", providerId);
++                        return ["custom-fixture", "remote-a", "remote-b"];
++                      },
++                      onImportRemoteModels: async (
++                        providerId: string,
++                        modelIds: readonly string[],
++                      ) => {
++                        await request("importRemoteModels", { providerId, modelIds });
++                        setProvider((current) => {
++                          const sample = current.models.find((model) => model.modelId === "custom-fixture");
++                          if (!sample) return current;
++                          return {
++                            ...current,
++                            models: [...current.models, ...modelIds.map((modelId) => ({ ...sample, modelId }))],
++                          };
++                        });
++                      },
++                      onClearModels: async (providerId: string) => {
++                        await request("clearModels", providerId);
++                        setProvider((current) => ({ ...current, models: [] }));
++                      },
++                    }
++                  : {})}
+                 onDeletePersonalModel={async (_id, modelId) => {
+                   await request("delete", modelId);
+                   setProvider((p) => ({
+@@ -263,6 +290,7 @@ createRoot(document.getElementById("root")!).render(
+   >
+     <TooltipProvider>
+       <ZCodeIntlProvider initialLocale={params.get("locale") === "zh-CN" ? "zh-CN" : "en-US"}>
++        {params.has("remoteModels") ? <ConfirmDialogHost /> : null}
+         {params.has("teamEntry") ? (
+           <OffPeakTeamEntryFixture />
+         ) : params.has("offpeak") ? (
+diff --git a/packages/ui/test/browser/manual-review/pending/provider-settings-batch.test.mjs b/packages/ui/test/browser/manual-review/pending/provider-settings-batch.test.mjs
+index 96a42394..9669e7be 100644
+--- a/packages/ui/test/browser/manual-review/pending/provider-settings-batch.test.mjs
++++ b/packages/ui/test/browser/manual-review/pending/provider-settings-batch.test.mjs
+@@ -65,6 +65,53 @@ registerOffPeakEligibilityCases(() => ({ browser, origin }));
+ registerProviderPresentationCases(() => ({ browser, origin, artifacts }));
+ registerProviderModelEditorCases(() => ({ browser, origin, artifacts }));
+ registerProgressiveModelEditorCases(() => ({ browser, origin, artifacts }));
++
++test("saved provider imports selected remote models and clears only after confirmation", async () => {
++  const page = await browser.newPage();
++  const calls = [];
++  await page.route("**/mutation", async (route) => {
++    calls.push(route.request().postDataJSON());
++    await route.fulfill({ status: 200, body: "{}" });
++  });
++  try {
++    await page.goto(`${origin}fixture?locale=en-US&access=manual&remoteModels=1`);
++    const fetchModels = page.getByRole("button", { name: "Fetch models" });
++    const clearModels = page.locator("[data-provider-clear-models]");
++    const baseUrl = page.getByTestId("model-provider-base-url-input");
++    const apiKey = page.getByTestId("model-provider-api-key-input");
++    const initialBaseUrl = await baseUrl.inputValue();
++    const initialApiKey = await apiKey.inputValue();
++    await fetchModels.click();
++    const importDialog = page.getByRole("dialog", { name: "Select models to add" });
++    await importDialog.getByRole("checkbox", { name: "remote-b" }).click();
++    await importDialog.getByRole("button", { name: "Add 1 models" }).click();
++    await importDialog.waitFor({ state: "hidden" });
++    await page.getByText("remote-b", { exact: true }).waitFor();
++    assert.equal(await page.getByText("remote-a", { exact: true }).count(), 0);
++
++    await clearModels.click();
++    const confirm = page.getByRole("dialog", { name: "Clear all models?" });
++    await confirm.getByRole("button", { name: "Cancel" }).click();
++    await confirm.waitFor({ state: "hidden" });
++    await page.getByText("remote-b", { exact: true }).waitFor();
++    assert.equal(calls.filter(({ action }) => action === "clearModels").length, 0);
++
++    await clearModels.click();
++    await confirm.getByTestId("confirm-dialog-confirm").click();
++    await clearModels.waitFor({ state: "hidden" });
++    assert.equal(await page.getByText("remote-b", { exact: true }).count(), 0);
++    assert.equal(await baseUrl.inputValue(), initialBaseUrl);
++    assert.equal(await apiKey.inputValue(), initialApiKey);
++    assert.deepEqual(calls, [
++      { action: "listRemoteModels", payload: "fixture" },
++      { action: "importRemoteModels", payload: { providerId: "fixture", modelIds: ["remote-b"] } },
++      { action: "clearModels", payload: "fixture" },
++    ]);
++  } finally {
++    await page.close();
++  }
++});
++
+ for (const [width, locale, theme] of [
+   [390, "zh-CN", "light"],
+   [1200, "en-US", "dark"],
+diff --git a/packages/ui/src/i18n/locales/en-US.ts b/packages/ui/src/i18n/locales/en-US.ts
+--- a/packages/ui/src/i18n/locales/en-US.ts
++++ b/packages/ui/src/i18n/locales/en-US.ts
+@@ -4007,6 +4007,23 @@
+   "settings.modelProvider.models": "Model list",
+   "settings.modelProvider.modelsEmpty": "No models are configured. Add a model to use it in chat.",
+   "settings.modelProvider.addModel": "Add model",
++  "settings.modelProvider.fetchModels": "Fetch models",
++  "settings.modelProvider.fetchingModels": "Fetching models",
++  "settings.modelProvider.fetchModelsDialogTitle": "Select models to add",
++  "settings.modelProvider.fetchModelsDialogDescription":
++    "{total} remote models found. {added} are already in this list. New models are unchecked by default.",
++  "settings.modelProvider.fetchModelsSearchPlaceholder": "Search model ID",
++  "settings.modelProvider.fetchModelsSearchEmpty": "No matching models",
++  "settings.modelProvider.fetchModelsSelectedCount": "{count} new models selected",
++  "settings.modelProvider.fetchModelsSelectVisible": "Select visible",
++  "settings.modelProvider.fetchModelsDeselectVisible": "Clear visible selection",
++  "settings.modelProvider.fetchModelsAlreadyAdded": "Added",
++  "settings.modelProvider.fetchModelsConfirm": "Add {count} models",
++  "settings.modelProvider.clearModels": "Clear",
++  "settings.modelProvider.clearModelsConfirmTitle": "Clear all models?",
++  "settings.modelProvider.clearModelsConfirmDescription":
++    "This removes every model from this provider. The Base URL and API key stay.",
++  "settings.modelProvider.clearModelsConfirmAction": "Clear",
+   "settings.modelProvider.modelId": "Model ID",
+   "settings.modelProvider.modelDisplayName": "Display name",
+   "settings.modelProvider.modelApiFormat.anthropic": "Anthropic messages",
+diff --git a/packages/ui/src/i18n/locales/zh-CN.ts b/packages/ui/src/i18n/locales/zh-CN.ts
+--- a/packages/ui/src/i18n/locales/zh-CN.ts
++++ b/packages/ui/src/i18n/locales/zh-CN.ts
+@@ -3757,6 +3757,23 @@
+   "settings.modelProvider.models": "模型列表",
+   "settings.modelProvider.modelsEmpty": "当前没有配置模型，添加模型后可在聊天中使用。",
+   "settings.modelProvider.addModel": "添加模型",
++  "settings.modelProvider.fetchModels": "获取模型列表",
++  "settings.modelProvider.fetchingModels": "正在获取模型列表",
++  "settings.modelProvider.fetchModelsDialogTitle": "选择要添加的模型",
++  "settings.modelProvider.fetchModelsDialogDescription":
++    "远端共 {total} 个模型，其中 {added} 个已在当前列表。新模型默认不勾选。",
++  "settings.modelProvider.fetchModelsSearchPlaceholder": "搜索模型 ID",
++  "settings.modelProvider.fetchModelsSearchEmpty": "没有匹配的模型",
++  "settings.modelProvider.fetchModelsSelectedCount": "已选 {count} 个新模型",
++  "settings.modelProvider.fetchModelsSelectVisible": "全选当前结果",
++  "settings.modelProvider.fetchModelsDeselectVisible": "取消当前结果",
++  "settings.modelProvider.fetchModelsAlreadyAdded": "已添加",
++  "settings.modelProvider.fetchModelsConfirm": "添加 {count} 个模型",
++  "settings.modelProvider.clearModels": "清空",
++  "settings.modelProvider.clearModelsConfirmTitle": "清空当前模型列表？",
++  "settings.modelProvider.clearModelsConfirmDescription":
++    "将移除这个供应商下的全部模型。Base URL 和 API Key 会保留。",
++  "settings.modelProvider.clearModelsConfirmAction": "清空",
+   "settings.modelProvider.modelId": "模型 ID",
+   "settings.modelProvider.modelDisplayName": "显示名称",
+   "settings.modelProvider.modelApiFormat.anthropic": "Anthropic Messages",

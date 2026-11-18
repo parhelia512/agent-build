@@ -1,0 +1,74 @@
+name: Prepare patched ZCodium source
+description: Clone a ZCodium release tag, then apply the three port patches in order.
+
+inputs:
+  repository:
+    description: Upstream repository in owner/name form.
+    required: true
+  ref:
+    description: ZCodium tag to check out.
+    required: true
+  workdir:
+    description: Directory under GITHUB_WORKSPACE used for the upstream checkout.
+    required: false
+    default: zcodium-src
+  patch-dir:
+    description: Directory under GITHUB_WORKSPACE that stores the patch files.
+    required: false
+    default: patches
+
+runs:
+  using: composite
+  steps:
+    - name: Clone and patch
+      shell: bash
+      env:
+        UPSTREAM_REPOSITORY: ${{ inputs.repository }}
+        UPSTREAM_REF: ${{ inputs.ref }}
+        UPSTREAM_WORKDIR: ${{ inputs.workdir }}
+        PATCH_DIR: ${{ inputs.patch-dir }}
+      run: |
+        set -euo pipefail
+
+        target="$GITHUB_WORKSPACE/$UPSTREAM_WORKDIR"
+        patch_root="$GITHUB_WORKSPACE/$PATCH_DIR"
+
+        if [ -z "$UPSTREAM_REF" ]; then
+          echo "::error::upstream ref is empty"
+          exit 1
+        fi
+
+        rm -rf "$target"
+        # 保留 LF，否则 Windows runner 的 autocrlf 会改写上下文导致补丁失配。
+        git -c core.autocrlf=false clone --branch "$UPSTREAM_REF" \
+          "https://github.com/$UPSTREAM_REPOSITORY.git" "$target"
+
+        cd "$target"
+
+        patches=(
+          "01-personal-model-remote-models.patch"
+          "02-prompt-enhance.patch"
+          "03-compact-model-alignment.patch"
+        )
+
+        for patch in "${patches[@]}"; do
+          patch_file="$patch_root/$patch"
+          if [ ! -f "$patch_file" ]; then
+            echo "::error::patch not found: $PATCH_DIR/$patch"
+            exit 1
+          fi
+
+          echo "Checking $patch"
+          if ! git apply --check "$patch_file"; then
+            echo "::error::$patch does not apply to $UPSTREAM_REPOSITORY@$UPSTREAM_REF"
+            exit 1
+          fi
+
+          echo "Applying $patch"
+          if ! git apply "$patch_file"; then
+            echo "::error::failed to apply $patch"
+            exit 1
+          fi
+        done
+
+        git status --short

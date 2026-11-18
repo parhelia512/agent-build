@@ -1,0 +1,736 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号：1.0.0（勾选预发布=自动生成 1.0.0-audit.<当天日期>，同日重复构建自动加 .2/.3；不勾选=正式版 v1.0.0）；也可直接填完整日期形式 1.0.0-audit.20260922[.2]"
+        required: true
+        type: string
+      prerelease:
+        description: "预发布（audit 日期式版本）；不勾选则发布正式版（干净版本号，成为 GitHub Latest）"
+        required: false
+        type: boolean
+        default: false
+      build_artifacts:
+        description: "构建 CLI 发行包和桌面客户端并上传到 Release；全部上传成功后才发布（失败则保持 draft）"
+        required: false
+        type: boolean
+        default: true
+      keep_draft:
+        description: "保持 draft 不公开（用于上游审计自动构建的测试版本；勾选后即使全部成功也不发布）"
+        required: false
+        type: boolean
+        default: false
+      notice:
+        description: "插入 Release 说明顶部的警示文本（可选，支持多行；用于测试版提示）"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # 上游源码仓库与本地目录：补丁目录固定为 $GITHUB_WORKSPACE/patches，
+  # 源码始终克隆到 $GITHUB_WORKSPACE/zcodium-src，二者互不混用。
+  UPSTREAM_REPOSITORY: ZCodium-project/ZCodium
+  UPSTREAM_WORKDIR: zcodium-src
+  PATCH_DIR: patches
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # 版本命名：
+          #   1.0.0 + 勾选预发布 -> 1.0.0-audit.<YYYYMMDD>（同一天重复构建自动追加 .2/.3/...）
+          #   1.0.0 + 不勾选     -> v1.0.0（正式版，成为 GitHub Latest，/releases/latest 可用）
+          #   完整日期形式         -> 严格按给定版本使用，不自动递增
+          DATE="$(date -u +%Y%m%d)"
+          if printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' && [ "$PRERELEASE" != "true" ]; then
+            TAG="v$VERSION"
+            if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+              echo "::error::Tag $TAG already exists"
+              exit 1
+            fi
+          elif printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            BASE="$VERSION-audit.$DATE"
+            TAG="v$BASE"
+            if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+              SEQ=2
+              while git ls-remote --tags origin "refs/tags/v$BASE.$SEQ" | grep -q .; do
+                SEQ=$((SEQ + 1))
+              done
+              TAG="v$BASE.$SEQ"
+            fi
+          elif printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-audit\.[0-9]{8}(\.[0-9]+)?$'; then
+            TAG="v$VERSION"
+            if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+              echo "::error::Tag $TAG already exists; pass the base version (e.g. 1.0.0) to auto-sequence, or pick another date/suffix"
+              exit 1
+            fi
+          else
+            echo "::error::Invalid version \"$VERSION\". Use 1.0.0 (pre-release: date and same-day sequence are appended; stable: v1.0.0) or the full form 1.0.0-audit.20260922[.2]"
+            exit 1
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # 桌面构建用完整版本（不带 v 前缀）注入 ZCODE_APP_VERSION，让安装包文件名带审计序号。
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # 触发 tag 就是上游 ZCodium 的版本 tag；先克隆该 tag 并应用补丁，后续说明生成
+      # 与构建都基于这份已修补源码。
+      - name: Clone upstream and apply patches
+        uses: ./.github/actions/prepare-source
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ steps.validate.outputs.tag }}
+          workdir: ${{ env.UPSTREAM_WORKDIR }}
+          patch-dir: ${{ env.PATCH_DIR }}
+
+      # tag 在构建前就推送，但 release 先建为 draft：
+      # 官网/下载页只解析已发布且带产物列表的 release，draft 不会露出，
+      # 避免用户在构建过程中下到某个尚未上传完成的平台产物（404）。
+      - name: Create tag
+        env:
+          TAG: ${{ steps.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Create draft release
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.validate.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          NOTICE: ${{ inputs.notice }}
+        run: |
+          set -euo pipefail
+          # #79：人工版本说明是完整正文，避免自动摘要和旧营销模板混入本次功能/限制说明。
+          VERSION="${TAG#v}"
+          VERSION_NOTES="docs/releases/v${VERSION}.md"
+          if [ -f "$VERSION_NOTES" ]; then
+            sed "s/<VERSION>/${VERSION}/g" "$VERSION_NOTES" > /tmp/release-notes.md
+          else
+            cat > /tmp/release-notes.md <<'NOTES'
+          # ZCodium <VERSION>
+
+          ## English
+
+          ### What changed vs ZCode
+
+          - **All monitoring and telemetry removed** (~26k lines): ARMS RUM, OTLP reporting, crash collection, resource and network sampling, UI analytics - with regression checks so they cannot be reintroduced.
+          - **Only optional official integrations remain**: plugin marketplace and remote client config are off by default and can be selected under Settings -> Z.AI services. These switches do not restore removed account, purchase or sharing features; feedback points to GitHub Issues.
+          - **Use your own provider without an official account**: account login, purchases and sharing are removed. Configure your own API key or a custom model provider; there is no official sign-in or coding-plan purchase entry.
+          - **No repository upload behavior**: snapshot packaging and upload logic removed, with guards against reintroduction.
+          - **Open source and reviewable**: first-party code MIT, upstream Apache-2.0; removal reports for desktop, CLI and UI ship in the repository.
+          - **Transparent builds**: installers are built by GitHub Actions from this repository, and in-app updates point to this repository's GitHub Releases.
+          - **Honest limitations**: Computer Use is an unavailable placeholder; installers are not signed by ZCode.
+
+          ### Install
+
+          - **macOS (.dmg)**: download `ZCodium-<VERSION>-mac-arm64.dmg` (Apple Silicon) or `ZCodium-<VERSION>-mac-x64.dmg` (Intel), open it, drag ZCodium into Applications. The app is not signed by ZCode, so Gatekeeper blocks the first launch - this system block is macOS only. Allow it once with the command below (enter your login password when asked; nothing is shown while typing; the command launches the app and exits immediately):
+
+            ```bash
+            sudo /usr/bin/xattr -rd com.apple.quarantine "/Applications/ZCodium.app" && open -a "ZCodium"
+            ```
+
+            The absolute `/usr/bin/xattr` path avoids shadowing by other tools with the same name. You can also right-click (Control-click) the app in Finder -> Open -> Open.
+          - **Windows (.exe)**: run `ZCodium-<VERSION>-win-x64.exe`. The installer is not signed by ZCode, so SmartScreen shows a warning - a warning, not a system block; click **More info** -> **Run anyway**. This is expected, not a corrupted file.
+          - **Linux x64 (.AppImage)**: `chmod +x ZCodium-<VERSION>-linux-x86_64.AppImage && ./ZCodium-<VERSION>-linux-x86_64.AppImage`.
+          - **Linux arm64 (.AppImage)**: `chmod +x ZCodium-<VERSION>-linux-arm64.AppImage && ./ZCodium-<VERSION>-linux-arm64.AppImage`.
+          - **CLI (.tar.gz)**: requires Node.js 24. Extract and run:
+
+            ```bash
+            tar -xzf zcodium-<VERSION>.tar.gz
+            cd zcodium
+            ./install.sh        # installs the zcode command into ~/.zcode/runtime
+            zcode --help        # or run: node bin/zcode.mjs --help
+            ```
+
+          ## 中文
+
+          ### 相对 ZCode 的改动
+
+          - **移除全部监控与遥测**（约 2.6 万行）：ARMS RUM、OTLP 上报、崩溃采集、资源与网络采样、UI 埋点，并加了防回归检查，防止重新引入。
+          - **仅保留可选官方集成**：仅插件市场与客户端远端配置仍可在“设置 → Z.AI 服务”中选择开启，默认关闭；这些开关不能恢复已删除的账号、购买或分享功能，反馈指向 GitHub Issues。
+          - **使用个人 Provider，不依赖官方账号**：官方账号、购买和分享入口已移除。首次启动直接配置自己的 API Key 或自定义模型，不提供官方登录或编码套餐购买入口。
+          - **移除仓库上传行为**：快照打包与上传逻辑已删除，并加了防回归保护。
+          - **开源可复核**：第一方代码 MIT，上游代码 Apache-2.0；桌面端、CLI、UI 的移除报告随仓库发布。
+          - **构建透明**：安装包由 GitHub Actions 从本仓库构建；应用内更新指向本仓库的 GitHub Releases。
+          - **如实说明限制**：Computer Use 为不可用占位；安装包没有 ZCode 官方签名。
+
+          ### 安装说明
+
+          - **macOS（.dmg）**：按机型下载 `ZCodium-<VERSION>-mac-arm64.dmg`（Apple Silicon）或 `ZCodium-<VERSION>-mac-x64.dmg`（Intel），打开后把 ZCodium 拖进“应用程序”。没有 ZCode 官方签名，Gatekeeper 会拦截首次打开——这是 macOS 独有的系统拦截。用下面命令放行一次（输入密码时不显示字符；命令会自动启动应用并立即退出）：
+
+            ```bash
+            sudo /usr/bin/xattr -rd com.apple.quarantine "/Applications/ZCodium.app" && open -a "ZCodium"
+            ```
+
+            使用 `/usr/bin/xattr` 绝对路径，避免 PATH 中同名工具干扰。也可以在“访达”里右键（Control-点击）应用 -> 打开 -> 弹窗里再点“打开”。
+          - **Windows（.exe）**：运行 `ZCodium-<VERSION>-win-x64.exe`。没有 ZCode 官方签名，SmartScreen 会显示警告——只是警告，不是系统拦截；点“**更多信息**” -> “**仍要运行**”。这是预期提示，不是文件损坏。
+          - **Linux x64（.AppImage）**：`chmod +x ZCodium-<VERSION>-linux-x86_64.AppImage && ./ZCodium-<VERSION>-linux-x86_64.AppImage`。
+          - **Linux arm64（.AppImage）**：`chmod +x ZCodium-<VERSION>-linux-arm64.AppImage && ./ZCodium-<VERSION>-linux-arm64.AppImage`。
+          - **CLI（.tar.gz）**：需要 Node.js 24。解压后运行：
+
+            ```bash
+            tar -xzf zcodium-<VERSION>.tar.gz
+            cd zcodium
+            ./install.sh        # 安装 zcode 命令到 ~/.zcode/runtime
+            zcode --help        # 或直接运行：node bin/zcode.mjs --help
+            ```
+
+          ## Downloads / 产物
+
+          - macOS Apple Silicon: `ZCodium-<VERSION>-mac-arm64.dmg` / `.zip`
+          - macOS Intel: `ZCodium-<VERSION>-mac-x64.dmg` / `.zip`
+          - Windows x64: `ZCodium-<VERSION>-win-x64.exe`
+          - Linux x64: `ZCodium-<VERSION>-linux-x86_64.AppImage`
+          - Linux arm64: `ZCodium-<VERSION>-linux-arm64.AppImage`
+          - CLI: `zcodium-<VERSION>.tar.gz`
+          - Checksums: `sha256.txt`（覆盖上方安装包与 CLI 包 / covers the installers and CLI package above）
+          - Update metadata: `latest*.yml`, `latest.json`
+          NOTES
+            sed -i "s/<VERSION>/${VERSION}/g" /tmp/release-notes.md
+            # 没有人工正文才生成差异。只接受正式 tag，避免 draft audit tag 截断基线。
+            # 条目沿用双语映射；缺翻译时附隐藏 TODO 注释。
+            BASE_TAG=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' "${TAG}^" 2>/dev/null || true)
+            if [ -n "$BASE_TAG" ]; then
+              CHANGES=$(node scripts/render-release-changelog.mjs --from "$BASE_TAG" --to "$TAG")
+              {
+                echo "## Changelog (vs $BASE_TAG) / 更新日志（相对 $BASE_TAG）"
+                echo ""
+                if [ -n "$CHANGES" ]; then
+                  printf '%s\n' "$CHANGES"
+                else
+                  echo "- 无代码变更 / No code changes"
+                fi
+                echo ""
+                echo "对比完整变更 / Full diff: https://github.com/${UPSTREAM_REPOSITORY}/compare/${BASE_TAG}...${TAG}"
+                echo ""
+                echo "---"
+                echo ""
+              } > /tmp/changelog-section.md
+              head -n 1 /tmp/release-notes.md > /tmp/release-notes-title.md
+              tail -n +2 /tmp/release-notes.md > /tmp/release-notes-rest.md
+              { cat /tmp/release-notes-title.md; echo; cat /tmp/changelog-section.md; cat /tmp/release-notes-rest.md; } > /tmp/release-notes-merged.md
+              mv /tmp/release-notes-merged.md /tmp/release-notes.md
+            fi
+          fi
+          # 测试版警示（如上游审计自动构建的 draft）插入到说明顶部
+          if [ -n "${NOTICE:-}" ]; then
+            { printf '%s\n\n' "$NOTICE"; cat /tmp/release-notes.md; } > /tmp/release-notes-with-notice.md
+            mv /tmp/release-notes-with-notice.md /tmp/release-notes.md
+          fi
+          args=(--draft --title "$TAG" --notes-file /tmp/release-notes.md --repo "$GITHUB_REPOSITORY")
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}"
+
+  build:
+    needs: release
+    if: ${{ inputs.build_artifacts }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone upstream and apply patches
+        uses: ./.github/actions/prepare-source
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.release.outputs.tag }}
+          workdir: ${{ env.UPSTREAM_WORKDIR }}
+          patch-dir: ${{ env.PATCH_DIR }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ env.UPSTREAM_WORKDIR }}/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Build project references
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        # v3.15.1 再基线后 monorepo 明显变大：macOS runner 默认 Node heap 上限
+        # 跑全量 tsc -b 会 OOM（FATAL ERROR: heap out of memory，exit 134）。
+        # 显式提高上限，避免依赖 runner 默认值。
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm typecheck
+
+      - name: Build ZCode CLI distribution
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          # CLI 发行包内置的 provider 配置必须与桌面一致：默认（test）会读
+          # zcode-builtin.test.json，漏掉本地预设（OrcaRouter / Cheaper Inference / cheapaimodel）。
+          ZCODE_ENV: production
+          ZCODE_DIST_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.release.outputs.tag }}/
+          RELEASE_TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          pnpm build:zcode -- --version "${RELEASE_TAG#v}"
+
+      # cli 包的类型检查必须在 CLI 依赖构建之后：其 tsconfig 经 workspace 链接解析
+      # 各依赖包 dist 的类型声明，干净检出时直接跑会 TS2307（根 typecheck 因此不覆盖
+      # cli，见 #34）。build:zcode 已把依赖与 CLI 本体全部构建完，此处检查的是真实源码类型。
+      - name: Typecheck CLI package
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        run: pnpm run typecheck:cli
+
+      - name: Upload assets to release
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # GitHub API 偶发连接失败（runner 网络抖动），上传重试 3 次；--clobber 让重试可安全覆盖。
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" \
+              dist/zcode/releases/*/zcodium-*.tar.gz \
+              dist/zcode/releases/*/sha256.txt \
+              dist/zcode/install.sh \
+              dist/zcode/latest.json \
+              --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "::warning::gh release upload failed (attempt $attempt/3), retrying in 10s"
+            sleep 10
+          done
+          echo "::error::gh release upload failed after 3 attempts"
+          exit 1
+
+      # 校验片段：各构建 job 只上传自己产出的文件哈希，由 checksums job 合并成
+      # release 的 sha256.txt。CLI 侧沿用 build-zcode 生成的 tarball sha256.txt，
+      # 并补上由用户直接下载执行的 install.sh。
+      # 用 node 计算（各 runner 都有），避免 sha256sum / shasum / certutil 的平台差异；
+      # 输出格式 `<hash>  <file>`（两个空格）与 sha256sum -c 兼容。
+      - name: Generate CLI checksums
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release-checksums
+          {
+            cat dist/zcode/releases/*/sha256.txt
+            (cd dist/zcode && node -e '
+          const { createHash } = require("node:crypto");
+          const { readFileSync } = require("node:fs");
+          for (const file of process.argv.slice(1)) {
+            console.log(createHash("sha256").update(readFileSync(file)).digest("hex") + "  " + file);
+          }
+          ' install.sh)
+          } > dist/release-checksums/cli.txt
+          cat dist/release-checksums/cli.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums-cli
+          path: ${{ env.UPSTREAM_WORKDIR }}/dist/release-checksums/cli.txt
+          retention-days: 1
+
+  desktop:
+    needs: release
+    if: ${{ inputs.build_artifacts }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # #108：macos-14 于 2026-11-02 退役（actions/runner-images#13518）。
+          # macos-15 是 ARM64；Intel 仍使用独立的 macos-15-intel，避免目标架构错配。
+          - runner: macos-15
+            target: mac
+            arch: arm64
+          - runner: macos-15-intel
+            target: mac
+            arch: x64
+          - runner: windows-latest
+            target: win
+            arch: x64
+          - runner: ubuntu-latest
+            target: linux
+            arch: x64
+          # GitHub 公开仓库免费的 ARM64 runner（ubuntu-24.04-arm）；electron-builder 在原生 arm64 上
+          # 打包 linux arm64 的 AppImage/deb，无需 QEMU 交叉仿真。
+          # 更新元数据生成 latest-linux-arm64.yml，与 x64 的 latest-linux.yml 不冲突，可并行上传。
+          - runner: ubuntu-24.04-arm
+            target: linux
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone upstream and apply patches
+        uses: ./.github/actions/prepare-source
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.release.outputs.tag }}
+          workdir: ${{ env.UPSTREAM_WORKDIR }}
+          patch-dir: ${{ env.PATCH_DIR }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ env.UPSTREAM_WORKDIR }}/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Build project references
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        # v3.15.1 再基线后 monorepo 明显变大：macOS runner 默认 Node heap 上限
+        # 跑全量 tsc -b 会 OOM（FATAL ERROR: heap out of memory，exit 134）。
+        # 显式提高上限，避免依赖 runner 默认值。
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm typecheck
+
+      # Linux 打包：fpm 产 rpm 需要系统 rpmbuild 与 xz，产 pacman 需要 bsdtar（libarchive-tools）；
+      # GitHub ubuntu runner 未预装，按 docs/desktop-ci-cd.md 的兜底清单现场安装。
+      - name: Install Linux packaging tools
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm xz-utils libarchive-tools fakeroot
+
+      - name: Bundle desktop app
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          ZCODE_ENV: production
+          # 文件名与应用版本带上完整审计版本（如 1.0.0-audit.20260922.6），不再只写 1.0.0。
+          ZCODE_APP_VERSION: ${{ needs.release.outputs.version }}
+          # 内置远程资源默认源：指向本仓库该 tag 的 descriptor/archive。
+          # 安装后的客户端开箱即可连接 WSL/SSH，不再要求用户配置环境变量。
+          ZCODIUM_REMOTE_ASSET_CDN_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.release.outputs.tag }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: pnpm bundle:desktop -- --os ${{ matrix.target }} --arch ${{ matrix.arch }}
+
+      - name: Stage verified desktop metadata fragment
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        # Windows 默认 PowerShell 不展开 $VERSION；与后续上传保持同一 Bash 合同。
+        shell: bash
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: >-
+          node scripts/release-update-metadata.mjs stage
+          --directory packages/desktop/dist
+          --out dist/release-update-metadata/${{ matrix.target }}-${{ matrix.arch }}
+          --platform ${{ matrix.target }} --arch ${{ matrix.arch }} --version "$VERSION"
+
+      - name: Upload desktop asset to release
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # #76：并行 job 不写最终清单，只上传 stage 已验证的本架构文件和 blockmap。
+          files=()
+          while IFS= read -r file; do
+            files+=("$file")
+          done < dist/release-update-metadata/${{ matrix.target }}-${{ matrix.arch }}/upload-paths.txt
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no desktop assets matched in packages/desktop/dist"
+            exit 1
+          fi
+          # GitHub API 偶发连接失败（runner 网络抖动），上传重试 3 次；--clobber 让重试可安全覆盖。
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "::warning::gh release upload failed (attempt $attempt/3), retrying in 10s"
+            sleep 10
+          done
+          echo "::error::gh release upload failed after 3 attempts"
+          exit 1
+
+      # 与元数据消费同一份 stage 文件摘要，避免出现两套上传文件选择或哈希事实。
+      - name: Generate desktop checksums
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist/release-checksums"
+          cp dist/release-update-metadata/${{ matrix.target }}-${{ matrix.arch }}/checksums.txt \
+            "$GITHUB_WORKSPACE/dist/release-checksums/desktop-${{ matrix.target }}-${{ matrix.arch }}.txt"
+          cat "$GITHUB_WORKSPACE/dist/release-checksums/desktop-${{ matrix.target }}-${{ matrix.arch }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums-desktop-${{ matrix.target }}-${{ matrix.arch }}
+          path: dist/release-checksums/desktop-${{ matrix.target }}-${{ matrix.arch }}.txt
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-update-metadata-${{ matrix.target }}-${{ matrix.arch }}
+          path: ${{ env.UPSTREAM_WORKDIR }}/dist/release-update-metadata/${{ matrix.target }}-${{ matrix.arch }}/fragment.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # #76：最终更新清单只有这个写者，禁止 macOS 两架构用 --clobber 相互覆盖。
+  update-metadata:
+    needs: [release, desktop]
+    if: ${{ inputs.build_artifacts }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone upstream and apply patches
+        uses: ./.github/actions/prepare-source
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.release.outputs.tag }}
+          workdir: ${{ env.UPSTREAM_WORKDIR }}
+          patch-dir: ${{ env.PATCH_DIR }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+          cache-dependency-path: ${{ env.UPSTREAM_WORKDIR }}/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-update-metadata-*
+          path: release-update-metadata
+
+      - name: Merge and verify update metadata against uploaded assets
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json tagName,isDraft,assets --repo "$GITHUB_REPOSITORY" > "$GITHUB_WORKSPACE/release-assets.json"
+          node -e 'if (JSON.parse(require("node:fs").readFileSync(process.argv[1])).isDraft !== true) throw new Error("Metadata writes require a draft release")' "$GITHUB_WORKSPACE/release-assets.json"
+          node scripts/release-update-metadata.mjs merge \
+            --fragments "$GITHUB_WORKSPACE/release-update-metadata" --out "$GITHUB_WORKSPACE/dist/release-updates" \
+            --version "$VERSION" --release-json "$GITHUB_WORKSPACE/release-assets.json"
+
+      - name: Upload final update metadata
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          uploaded=false
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" "$GITHUB_WORKSPACE"/dist/release-updates/latest*.yml --clobber --repo "$GITHUB_REPOSITORY"; then
+              uploaded=true
+              break
+            fi
+            echo "::warning::metadata upload failed (attempt $attempt/3)"
+            sleep 10
+          done
+          test "$uploaded" = true
+          gh release view "$TAG" --json tagName,isDraft,assets --repo "$GITHUB_REPOSITORY" > "$GITHUB_WORKSPACE/release-assets.json"
+          node -e 'if (JSON.parse(require("node:fs").readFileSync(process.argv[1])).isDraft !== true) throw new Error("Release was published before metadata verification")' "$GITHUB_WORKSPACE/release-assets.json"
+          node scripts/release-update-metadata.mjs verify \
+            --fragments "$GITHUB_WORKSPACE/release-update-metadata" --directory "$GITHUB_WORKSPACE/dist/release-updates" \
+            --version "$VERSION" --release-json "$GITHUB_WORKSPACE/release-assets.json"
+
+  # remote runtime 资产（WSL/SSH/Docker 远端连接用）：本仓库构建后以 GitHub Release
+  # 扁平布局上传，客户端用显式自建源（ZCODE_REMOTE_ASSET_CDN_BASE_URL）加载。
+  # 与其他产物一致：上传失败则 release 保持 draft，避免出现半套资产。
+  remote-assets:
+    needs: release
+    if: ${{ inputs.build_artifacts }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone upstream and apply patches
+        uses: ./.github/actions/prepare-source
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ needs.release.outputs.tag }}
+          workdir: ${{ env.UPSTREAM_WORKDIR }}
+          patch-dir: ${{ env.PATCH_DIR }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ${{ env.UPSTREAM_WORKDIR }}/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare remote assets
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          # 与 desktop job 相同：server bundle 与 manifest.appVersion 必须等于 app 版本，
+          # 否则客户端 appVersion 校验拒绝、远端部署版本检查反复不匹配。
+          ZCODE_APP_VERSION: ${{ needs.release.outputs.version }}
+        run: pnpm prepare:remote-assets
+
+      - name: Build GitHub release layout
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          ZCODE_APP_VERSION: ${{ needs.release.outputs.version }}
+        run: node scripts/publish-remote-assets.mjs --out dist/remote-assets-github
+
+      - name: Upload remote assets to release
+        working-directory: ${{ env.UPSTREAM_WORKDIR }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/remote-assets-github/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no remote asset files produced"
+            exit 1
+          fi
+          # GitHub API 偶发连接失败（runner 网络抖动），上传重试 3 次；--clobber 让重试可安全覆盖。
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "::warning::gh release upload failed (attempt $attempt/3), retrying in 10s"
+            sleep 10
+          done
+          echo "::error::gh release upload failed after 3 attempts"
+          exit 1
+
+  # 校验和收口：各构建 job 先上传自己的校验片段（artifact），这里合并成完整的
+  # sha256.txt，并覆盖 release 上 CLI 构建产出的初版（只有一行 tarball 哈希）。
+  # 放在 publish 之前：release 公开时校验清单已与全部产物一致；合并失败则保持 draft。
+  # 覆盖范围：全部安装包（dmg / zip / exe / AppImage）、CLI 包与 install.sh。
+  # latest*.yml、latest.json、*.blockmap、远端 descriptor/archive 不在其中（各自有校验机制）。
+  checksums:
+    needs: [release, build, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-checksums-*
+          merge-multiple: true
+          path: release-checksums
+
+      - name: Merge checksum fragments
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          fragments=(release-checksums/*.txt)
+          if [ ${#fragments[@]} -eq 0 ]; then
+            echo "::error::no checksum fragments were produced"
+            exit 1
+          fi
+          # 同一文件名出现多个哈希说明片段来源重叠，宁可失败也不发布有歧义的清单；
+          # sort -k 2 使同一文件名相邻，uniq -d 即可检出。
+          cat "${fragments[@]}" | LC_ALL=C sort -k 2 > sha256-merged.txt
+          duplicated="$(awk '{ print $2 }' sha256-merged.txt | uniq -d)"
+          if [ -n "$duplicated" ]; then
+            echo "::error::duplicate checksum entries for: $duplicated"
+            exit 1
+          fi
+          mv sha256-merged.txt sha256.txt
+          cat sha256.txt
+          # 回归保护：清单必须覆盖每个平台的安装包与 CLI 侧文件；缺任一类都说明
+          # 上传或片段生成出了问题，阻止发布而不是发布不完整的清单。
+          for pattern in \
+            '^[0-9a-f]{64}  zcodium-[^ ]+\.tar\.gz$' \
+            '^[0-9a-f]{64}  install\.sh$' \
+            '^[0-9a-f]{64}  ZCodium-[^ ]+\.dmg$' \
+            '^[0-9a-f]{64}  ZCodium-[^ ]+\.zip$' \
+            '^[0-9a-f]{64}  ZCodium-[^ ]+\.exe$' \
+            '^[0-9a-f]{64}  ZCodium-[^ ]+\.AppImage$'; do
+            if ! grep -Eq "$pattern" sha256.txt; then
+              echo "::error::sha256.txt is missing an entry matching $pattern"
+              exit 1
+            fi
+          done
+
+      - name: Upload merged checksum file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 本 job 不做 checkout：工作目录没有 git 仓库，gh 无法从 remote 推断目标仓库，
+          # 必须显式 --repo（其余 job 靠 checkout 提供上下文，此处不重复拉取仓库）。
+          for attempt in 1 2 3; do
+            if gh release upload "$TAG" sha256.txt --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "::warning::gh release upload failed (attempt $attempt/3), retrying in 10s"
+            sleep 10
+          done
+          echo "::error::gh release upload failed after 3 attempts"
+          exit 1
+
+  # 只有 CLI、桌面/远端产物、校验和与唯一更新清单收口都成功才公开；任一失败保持 draft，
+  # 由人工排查后重跑或删除，避免不完整的版本出现在 Releases 与官网下载页。
+  # keep_draft=true（上游审计自动构建的测试版）：即使全部成功也保持 draft，不公开、不进入自动更新。
+  publish:
+    needs: [release, build, desktop, remote-assets, checksums, update-metadata]
+    if: ${{ always() && inputs.keep_draft != true && needs.release.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped') && (needs['remote-assets'].result == 'success' || needs['remote-assets'].result == 'skipped') && (needs.checksums.result == 'success' || needs.checksums.result == 'skipped') && (needs['update-metadata'].result == 'success' || (inputs.build_artifacts != true && needs['update-metadata'].result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=(--draft=false --repo "$GITHUB_REPOSITORY")
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+          gh release edit "$TAG" "${args[@]}"

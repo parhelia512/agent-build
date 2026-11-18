@@ -1,0 +1,271 @@
+diff --git a/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts b/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts
+index ea918caa..cf4d2efa 100644
+--- a/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts
++++ b/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts
+@@ -3,12 +3,19 @@
+ // dispatchCommand("compact", baseRevision) → v4-bridge compactSession → CompactStarted/Completed
+ // 事件 → reducer onCompactLifecycle → timelineMarker compact/manual/success。
+ // 证明 slash 命令入口 + compact 全链路（命令面已桥接，仅补 UI 触发）。
+-import { TID_V4_COMPOSER_INPUT } from "@zcode/shared/test-ids";
++import {
++  UPSTREAM_PROVIDER_ID,
++  UPSTREAM_SECONDARY_MODEL,
++  ensureUpstreamModelForE2E,
++} from "../helpers/upstream-provider.js";
++import { TID_V4_MODEL_CONFIG } from "@zcode/shared/test-ids";
+ import { clearAppData, setInputValueByTestIdDom } from "../helpers/desktop-app.js";
+ import {
+   clickV4Send,
+   prepareV4ConversationE2E,
+   sendV4Prompt,
++  getLatestV4CommandAck,
++  switchV4Model,
+   waitForV4CompactMarker,
+   waitForV4Pane,
+   waitForV4TimelineContaining,
+@@ -20,6 +27,41 @@ describe("v4 M4 门禁：compact（/compact slash）", () => {
+     await clearAppData();
+   });
+ 
++  it("Composer 切换模型后 /compact 使用新的 Session model 状态", async () => {
++    await prepareV4ConversationE2E();
++    await ensureUpstreamModelForE2E(UPSTREAM_SECONDARY_MODEL);
++
++    await sendV4Prompt("E2E_V4_COMPACT_MODEL_SWITCH_SEED 请回复种子");
++    await waitForV4TimelineContaining("V4_COMPACT_MODEL_SWITCH_SEED_OK", 45000);
++    await waitForV4Pane(
++      (s) => !s.canStop && s.sessionId !== "draft" && s.sessionId !== null,
++      "首轮没有回到空闲态",
++      45000,
++    );
++
++    // 模型选择只先写 Composer draft；/compact 前的 Session 对齐屏障负责发 switchModelConfig。
++    await switchV4Model(UPSTREAM_PROVIDER_ID, UPSTREAM_SECONDARY_MODEL, "");
++    await browser.waitUntil(
++      async () =>
++        (await browser.$(`[data-testid="${TID_V4_MODEL_CONFIG}"]`).getAttribute("data-model")) ===
++        UPSTREAM_SECONDARY_MODEL,
++      {
++        timeout: 30000,
++        timeoutMsg: "Composer 模型切换后没有投影到 secondary model",
++      },
++    );
++    const previousSwitchAck = await getLatestV4CommandAck("ui:switchModelConfig");
++    await setInputValueByTestIdDom(TID_V4_COMPOSER_INPUT, "/compact", {
++      timeout: 15000,
++      timeoutMsg: "模型切换后 composer 输入框没有出现",
++    });
++    await clickV4Send();
++    await waitForV4CompactMarker({ origin: "manual", status: "success" }, 90000);
++    const compactSwitchAck = await getLatestV4CommandAck("ui:switchModelConfig");
++    expect(compactSwitchAck).toMatchObject({ status: "accepted" });
++    expect(compactSwitchAck).not.toEqual(previousSwitchAck);
++  });
++
+   it("首轮完成 → /compact → 时间线出现 manual compact success marker", async () => {
+     await prepareV4ConversationE2E();
+ 
+diff --git a/packages/ui/src/v4/SessionPane.tsx b/packages/ui/src/v4/SessionPane.tsx
+index 6f46a7a1..39e35e7a 100644
+--- a/packages/ui/src/v4/SessionPane.tsx
++++ b/packages/ui/src/v4/SessionPane.tsx
+@@ -94,6 +94,7 @@ import { formatModelChangeLabel } from "@/v4/composer/modelTriggerDisplay.js";
+ import { resolveAppFollowupMode } from "@/v4/composer/followupModeSettings.js";
+ import {
+   createComposerSubmissionConfig,
++  shouldAlignSessionModelBeforeSend,
+   type ComposerSubmissionConfig,
+ } from "@/v4/composer/composerSubmissionConfig.js";
+ import { useDraftSessionPrewarm } from "@/v4/composer/useDraftSessionPrewarm.js";
+@@ -2344,9 +2345,9 @@ export function SessionPane({
+     workspaceIdentity,
+     workspacePath,
+   });
+-  const ensureDraftPrewarmConfigBeforeSendRef = useRef<(targetSessionId: string) => Promise<void>>(
+-    async () => undefined,
+-  );
++  const ensureDraftPrewarmConfigBeforeSendRef = useRef<
++    (targetSessionId: string, submission: ComposerSubmissionConfig) => Promise<void>
++  >(async () => undefined);
+   const effectiveSessionId = sessionId ?? recoveringDraft?.sessionId ?? prewarmSessionId;
+   useEffect(() => {
+     if (!recoveringDraft?.commandId) return;
+@@ -2720,13 +2721,18 @@ export function SessionPane({
+           submission = { ...submission, modelSelection: chosen };
+         }
+       }
++      if (sessionId) {
++        // /compact 和其它 slash command 使用 runtime 当前 Session 模型；空闲时先收敛
++        // Composer 已冻结的选择。运行中的 admitted model 由 CLI 按既有模型继续完成。
++        await ensureDraftPrewarmConfigBeforeSendRef.current(sessionId, submission);
++      }
+       const prewarmTargetBeforeSend =
+         sessionId === null ? prewarmBindingRef.current?.sessionId : null;
+       if (prewarmTargetBeforeSend) {
+         // 屏障只保证已经入队的命令完成；若点击配置时预热 session/snapshot 尚未
+         // 就绪，命令可能当时没有目标。首发绑定确定的预热 session 前再同步一次
+         // 草稿权威配置，禁止 UI 新值与 runtime 旧值分叉。
+-        await ensureDraftPrewarmConfigBeforeSendRef.current(prewarmTargetBeforeSend);
++        await ensureDraftPrewarmConfigBeforeSendRef.current(prewarmTargetBeforeSend, submission);
+       }
+       // slash 命令优先：已有 session 直接消费；draft 首发 /goal 先建空会话再发命令。
+       // 携带附件或网页元素上下文时不消费为 v4 原生命令（compact/goal 等无附件语义），随 sendText 直发。
+@@ -2771,7 +2777,7 @@ export function SessionPane({
+       // 首发只能等待当前 owner 的同一创建任务，不能把 binding=null 当作另建许可。
+       const draftBinding = sessionId === null ? await waitForDraftSession() : null;
+       if (draftBinding) {
+-        await ensureDraftPrewarmConfigBeforeSendRef.current(draftBinding.sessionId);
++        await ensureDraftPrewarmConfigBeforeSendRef.current(draftBinding.sessionId, submission);
+         if (!draftBinding.beginPromotion()) throw new Error("草稿会话已切换，请重新发送");
+       }
+       const targetSessionId = sessionId ?? draftBinding!.sessionId;
+@@ -3307,29 +3313,57 @@ export function SessionPane({
+     [dispatchCommand, sessionId],
+   );
+   const ensureDraftPrewarmConfigBeforeSend = useCallback(
+-    async (targetSessionId: string) => {
+-      // followupMode 仍是 Session 行为设置；模型与模式属于本次 Submission，随 sendText
+-      // 原子提交，不能在发送前通过 CAS 改写共享 Session。
++    async (targetSessionId: string, submission: ComposerSubmissionConfig) => {
++      // followupMode 仍是 Session 行为设置；模式随 sendText 原子提交。
++      // 空闲时发送前对齐 runtime，避免下一回合的 sidecar（标题/compact）仍读旧选型。
++      // running/prewarming 时本回合已冻结 admitted Selection，不能改共享 Session。
+       const desiredConfig = buildDraftCreateConfigPayload(
+-        draftConfigRef.current,
++        {
++          ...draftConfigRef.current,
++          modelSelection: submission.modelSelection,
++        },
+         appFollowupMode,
+       ).config;
+       if (!desiredConfig) return;
+       const projectedConfig =
+         snapshotRef.current?.sessionId === targetSessionId ? snapshotRef.current.config : null;
+-
+-      const requireAcceptedConfigAck = (type: CommandType, ack: CommandAck | null) => {
++      const session =
++        snapshotRef.current?.sessionId === targetSessionId ? snapshotRef.current : null;
++      const logConfigAck = (type: CommandType, ack: CommandAck | null) => {
+         if (
+           ack &&
+           (ack.status === "accepted" || ack.status === "noop" || ack.status === "duplicate")
+         ) {
+           return;
+         }
+-        throw new Error(
+-          `${type} 未在首发前收敛: ${ack?.status ?? "missing-ack"} ${ack?.reasonCode ?? ""}`,
++        // sendText 已携带冻结 Submission；CAS 失败不能阻断发送，否则会出现
++        // 「Session 已切、正文被还回输入框」或把能发出的消息挡掉。
++        logger.warn(
++          `[v4-pane] ${type} 发送前未收敛，继续 sendText: ${ack?.status ?? "missing-ack"} ${ack?.reasonCode ?? ""}`,
+         );
+       };
+ 
++      const desiredSelection = desiredConfig.modelSelection;
++      if (
++        shouldAlignSessionModelBeforeSend(session?.control.phase) &&
++        desiredSelection &&
++        (desiredSelection.providerId !== projectedConfig?.modelSelection?.providerId ||
++          desiredSelection.modelId !== projectedConfig?.modelSelection?.modelId ||
++          desiredSelection.options?.reasoningLevel !==
++            projectedConfig?.modelSelection?.options?.reasoningLevel)
++      ) {
++        const ack = await dispatchConfigCas(
++          "switchModelConfig",
++          {
++            provider: desiredSelection.providerId,
++            model: desiredSelection.modelId,
++            thought: desiredSelection.options?.reasoningLevel ?? "",
++          },
++          { targetSessionId },
++        );
++        logConfigAck("switchModelConfig", ack);
++      }
++
+       if (
+         desiredConfig.followupMode &&
+         desiredConfig.followupMode !== projectedConfig?.followupMode
+@@ -3339,7 +3373,7 @@ export function SessionPane({
+           { mode: desiredConfig.followupMode },
+           { targetSessionId },
+         );
+-        requireAcceptedConfigAck("setFollowupMode", ack);
++        logConfigAck("setFollowupMode", ack);
+       }
+     },
+     [appFollowupMode, dispatchConfigCas, draftConfigRef],
+@@ -3506,9 +3540,21 @@ export function SessionPane({
+       if (!sessionId) return;
+       const parsed = parseV4VisibleSlashCommand(command);
+       if (!parsed) return;
+-      void dispatchSlashCommand(parsed, sessionId, snapshotRef.current?.revision, undefined);
++      const submission = createSubmissionFromComposer();
++      if (!submission) {
++        logger.warn("[v4-pane] compact skipped: Composer has no valid model selection");
++        return;
++      }
++      void (async () => {
++        if (submission) {
++          await ensureDraftPrewarmConfigBeforeSendRef.current(sessionId, submission);
++        }
++        await dispatchSlashCommand(parsed, sessionId, snapshotRef.current?.revision, undefined);
++      })().catch((error) => {
++        logger.warn(`[v4-pane] context usage ${parsed.kind} failed: ${String(error)}`);
++      });
+     },
+-    [dispatchSlashCommand, sessionId],
++    [createSubmissionFromComposer, dispatchSlashCommand, sessionId],
+   );
+ 
+   // 误停排障需要区分按钮与 Esc；普通 info 在生产禁用，必须走生命周期日志。
+diff --git a/packages/ui/src/v4/composer/composerSubmissionConfig.ts b/packages/ui/src/v4/composer/composerSubmissionConfig.ts
+index 6ad5d546..31b7b9c9 100644
+--- a/packages/ui/src/v4/composer/composerSubmissionConfig.ts
++++ b/packages/ui/src/v4/composer/composerSubmissionConfig.ts
+@@ -9,6 +9,11 @@ export interface ComposerSubmissionConfig {
+   planEnabled: boolean;
+ }
+ 
++/** 进行中的回合已冻结 admitted Selection；此时改共享 Session 选型会污染 sidecar。 */
++export function shouldAlignSessionModelBeforeSend(phase: string | undefined): boolean {
++  return phase !== "running" && phase !== "prewarming";
++}
++
+ /** 在点击提交的瞬间，把 Composer 意图冻结成本次 Submission 的执行配置。 */
+ export function createComposerSubmissionConfig(
+   composer:
+diff --git a/packages/ui/test/composerSubmissionConfig.test.ts b/packages/ui/test/composerSubmissionConfig.test.ts
+index 074d74c4..d8b83d20 100644
+--- a/packages/ui/test/composerSubmissionConfig.test.ts
++++ b/packages/ui/test/composerSubmissionConfig.test.ts
+@@ -1,6 +1,9 @@
+ import { describe, expect, it } from "vitest";
+ import type { ModelSelectionView } from "@zcode/services";
+-import { createComposerSubmissionConfig } from "@/v4/composer/composerSubmissionConfig.js";
++import {
++  createComposerSubmissionConfig,
++  shouldAlignSessionModelBeforeSend,
++} from "@/v4/composer/composerSubmissionConfig.js";
+ 
+ const view = {
+   revision: 1,
+@@ -25,6 +28,19 @@ const view = {
+   },
+ } as ModelSelectionView;
+ 
++describe("shouldAlignSessionModelBeforeSend", () => {
++  it.each(["draft", "idle", "completedSuccess", "error", undefined])(
++    "空闲或终态 phase %s 允许提交前同步模型",
++    (phase) => {
++      expect(shouldAlignSessionModelBeforeSend(phase)).toBe(true);
++    },
++  );
++
++  it.each(["running", "prewarming"] as const)("%s phase 保留已冻结的 admitted model", (phase) => {
++    expect(shouldAlignSessionModelBeforeSend(phase)).toBe(false);
++  });
++});
++
+ describe("createComposerSubmissionConfig", () => {
+   it("没有 Composer 草稿时返回空配置而不抛错", () => {
+     expect(createComposerSubmissionConfig(undefined, null)).toBeNull();
