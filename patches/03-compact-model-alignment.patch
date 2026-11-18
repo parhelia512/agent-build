@@ -1,5 +1,5 @@
 diff --git a/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts b/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts
-index ea918caa..cf4d2efa 100644
+index ea918caa..8ab59e86 100644
 --- a/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts
 +++ b/packages/desktop/test/e2e/conversation-session/conversation-session-v4-compact.test.ts
 @@ -3,12 +3,19 @@
@@ -12,7 +12,7 @@ index ea918caa..cf4d2efa 100644
 +  UPSTREAM_SECONDARY_MODEL,
 +  ensureUpstreamModelForE2E,
 +} from "../helpers/upstream-provider.js";
-+import { TID_V4_MODEL_CONFIG } from "@zcode/shared/test-ids";
++import { TID_V4_COMPOSER_INPUT, TID_V4_MODEL_CONFIG } from "@zcode/shared/test-ids";
  import { clearAppData, setInputValueByTestIdDom } from "../helpers/desktop-app.js";
  import {
    clickV4Send,
