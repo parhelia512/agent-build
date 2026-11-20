@@ -10,7 +10,8 @@ index 32e13499..dd94cd92 100644
      });
    };
 
- diff --git a/apps/zcode-cli/packages/bootstrap/src/app/types.ts b/apps/zcode-cli/packages/bootstrap/src/app/types.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/app/types.ts b/apps/zcode-cli/packages/bootstrap/src/app/types.ts
 index 06c0d2aa..a2c4c9c6 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/app/types.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/app/types.ts
@@ -23,7 +24,8 @@ index 06c0d2aa..a2c4c9c6 100644
  }
 
  export type SubmitPromptOptions = SubmitPromptOptionsBase &
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
 index 5724973e..0b818aa5 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
@@ -87,7 +89,8 @@ index 5724973e..0b818aa5 100644
      });
    } catch (error) {
      lifecycleStatus = params.abortController.signal.aborted ? "cancelled" : "failed";
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
 index 514ffb34..e1a5c584 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
@@ -108,7 +111,8 @@ index 514ffb34..e1a5c584 100644
    /** 会话查找（同一注册表对象引用；不存在返回 undefined → handler 拒绝）。 */
    getRecord(sessionId: string): V4SessionRecordView | undefined;
    logger?: V4CommandLogger;
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
 index 1c047705..837cf02a 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
@@ -121,7 +125,8 @@ index 1c047705..837cf02a 100644
    let updatedSessionCount = 0;
    for (const record of context.sessions.values()) {
      if (!record.app.setModelIoFullRetentionEnabled) continue;
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
 index 22421eff..62c92144 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
@@ -173,7 +178,8 @@ index 22421eff..62c92144 100644
      modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
      nativeSearchEnhancementsEnabled: runtimePreferences.nativeSearchEnhancementsEnabled,
      toolSearchMode: runtimePreferences.toolSearchMode,
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
 index 7f6c5430..a705f665 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
@@ -185,7 +191,8 @@ index 7f6c5430..a705f665 100644
      /** host 同步的 Off-Peak 工具面门禁；缺省 false（fail-closed），供 v4 冷恢复等无 host 参数的路径读取。 */
      offPeakToolEnabled: boolean;
      /**
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
 index af7bbc7f..7f8b8172 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
@@ -197,7 +204,8 @@ index af7bbc7f..7f8b8172 100644
          offPeakToolEnabled: false,
          // 动态工作流灰度门 fail-closed：Host 必须显式 workspace/updateDynamicWorkflowPolicy
          // 才开启。
- diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
 index e40409a7..9080f165 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
@@ -211,7 +219,8 @@ index e40409a7..9080f165 100644
      // 同一注册表对象引用：view 是旧 record 的结构化窄视图，字段变更双向可见。
      getRecord: (sessionId) => context.sessions.get(sessionId),
      // 同一登记表实例：broker（旧目录）注册反向请求 deferred，
- diff --git a/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts b/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
+
+diff --git a/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts b/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
 index 3986ba16..6702cdd7 100644
 --- a/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
 +++ b/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
@@ -250,7 +259,8 @@ index 3986ba16..6702cdd7 100644
      let finishCompact!: () => void;
      const compactGate = new Promise<Record<string, never>>((resolve) => {
        finishCompact = () => resolve({});
- diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
+
+diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
 index 1dfdc68f..ac9b9fbd 100644
 --- a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
 +++ b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
@@ -288,7 +298,8 @@ index 1dfdc68f..ac9b9fbd 100644
          return this.executeManualCompact(
            input,
            compactInstructions,
- diff --git a/apps/zcode-cli/packages/core/src/runtime/types.ts b/apps/zcode-cli/packages/core/src/runtime/types.ts
+
+diff --git a/apps/zcode-cli/packages/core/src/runtime/types.ts b/apps/zcode-cli/packages/core/src/runtime/types.ts
 index ae42ea6d..891bffcc 100644
 --- a/apps/zcode-cli/packages/core/src/runtime/types.ts
 +++ b/apps/zcode-cli/packages/core/src/runtime/types.ts
@@ -301,7 +312,8 @@ index ae42ea6d..891bffcc 100644
  }
 
  export type ExecuteTurnOptions = ExecuteTurnOptionsBase &
- diff --git a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
+
+diff --git a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
 index cb358871..4df16ece 100644
 --- a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
 +++ b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
@@ -355,7 +367,8 @@ index cb358871..4df16ece 100644
      const compactRequests: ModelRequest[] = [];
      const runtime = createTestAgentRuntime(
        createSessionId("runtime-full-compact-force-mcs"),
- diff --git a/packages/services/src/node.ts b/packages/services/src/node.ts
+
+diff --git a/packages/services/src/node.ts b/packages/services/src/node.ts
 index 8f7db8d2..9a2963a2 100644
 --- a/packages/services/src/node.ts
 +++ b/packages/services/src/node.ts
@@ -367,7 +380,8 @@ index 8f7db8d2..9a2963a2 100644
                modelContextBudgetStrategy,
                // user-execution 只消费 Shell；共享默认策略是统一 result schema 的兼容占位，
                // 不会覆盖 runtime-materialization 阶段已经固定的 strategy。
- diff --git a/packages/services/src/zcode-agent/zcodeAgent.ts b/packages/services/src/zcode-agent/zcodeAgent.ts
+
+diff --git a/packages/services/src/zcode-agent/zcodeAgent.ts b/packages/services/src/zcode-agent/zcodeAgent.ts
 index 4963b066..eecf3f72 100644
 --- a/packages/services/src/zcode-agent/zcodeAgent.ts
 +++ b/packages/services/src/zcode-agent/zcodeAgent.ts
@@ -379,7 +393,8 @@ index 4963b066..eecf3f72 100644
  }
 
  export interface ZCodeAgentLocalRuntimeChildProcesses {
- diff --git a/packages/services/src/zcode-agent/zcodeAgentService.ts b/packages/services/src/zcode-agent/zcodeAgentService.ts
+
+diff --git a/packages/services/src/zcode-agent/zcodeAgentService.ts b/packages/services/src/zcode-agent/zcodeAgentService.ts
 index d28cb45a..bdf97613 100644
 --- a/packages/services/src/zcode-agent/zcodeAgentService.ts
 +++ b/packages/services/src/zcode-agent/zcodeAgentService.ts
@@ -401,7 +416,8 @@ index d28cb45a..bdf97613 100644
        };
        latestAppRuntimePreferences = normalizedPreferences;
        const activeClients = [...activeClientsByWorkspaceKey.values()];
- diff --git a/packages/shared/src/app-runtime-preferences.ts b/packages/shared/src/app-runtime-preferences.ts
+
+diff --git a/packages/shared/src/app-runtime-preferences.ts b/packages/shared/src/app-runtime-preferences.ts
 index 24a2aa75..b93a228b 100644
 --- a/packages/shared/src/app-runtime-preferences.ts
 +++ b/packages/shared/src/app-runtime-preferences.ts
@@ -419,109 +435,8 @@ index 24a2aa75..b93a228b 100644
    })
    .strict();
 
- diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
-index f75c72ad..a16af0a2 100644
---- a/packages/shared/src/index.ts
-+++ b/packages/shared/src/index.ts
-@@ -127,7 +127,7 @@ export * from "./test-ids-workflow.js";
- export * from "./channels.js";
- export * from "./storage.js";
- export * from "./config-backup.js";
--export * from "./prompt-enhance.js";
-+export * from "./context-compression.js";
- export * from "./oauth.js";
- export * from "./desktopMenu.js";
- export * from "./feedback.js";
- diff --git a/packages/shared/src/protocol.ts b/packages/shared/src/protocol.ts
-index ccb55316..fe66ed9e 100644
---- a/packages/shared/src/protocol.ts
-+++ b/packages/shared/src/protocol.ts
-@@ -8,7 +8,7 @@ import type { WorkspacePurpose } from "./workspacePurpose.js";
- import type { DynamicWorkflowMode } from "./dynamic-workflow-feature.js";
- import type { EmbeddedBrowserViewportPreference } from "./browser-use/command-metadata.js";
- import type { AppToolSearchMode } from "./app-runtime-preferences.js";
--import type { PromptEnhanceSettings } from "./prompt-enhance.js";
-+import type { ContextCompressionSettings } from "./context-compression.js";
- import type { ConfigBackupWebdavSettings } from "./config-backup.js";
 
- // ── Domain types ──
-@@ -394,6 +394,8 @@ export interface AppSettings {
-   proactiveSuggestionsEnabled?: boolean;
-   /** 设置按浅合并写入，更新增强配置时须提交完整对象。 */
-   promptEnhance?: PromptEnhanceSettings;
-+  /** 设置按浅合并写入；压缩使用独立模型时须提交完整对象。 */
-+  contextCompression?: ContextCompressionSettings;
-   /** WebDAV 密码独立存入凭据服务，不写入此设置。 */
-   configBackupWebdav?: ConfigBackupWebdavSettings;
-   /** 新版只保存活动执行目录；不表达项目/连接成员，null 表示明确清空。 */
- diff --git a/packages/shared/src/validationAppSettings.ts b/packages/shared/src/validationAppSettings.ts
-index 094b9c86..ff6c2e30 100644
---- a/packages/shared/src/validationAppSettings.ts
-+++ b/packages/shared/src/validationAppSettings.ts
-@@ -1,6 +1,10 @@
- /* oxlint-disable eslint(max-lines) -- AppSettings schema 聚合历史迁移、默认值和 patch 校验，拆分会削弱设置迁移的单一入口。 */
- import { z } from "zod";
- import { modelFallbackChainSchema } from "./model-selection.js";
-+import {
-+  contextCompressionSettingsPatchSchema,
-+  contextCompressionSettingsSchema,
-+} from "./context-compression.js";
- import { promptEnhanceSettingsPatchSchema, promptEnhanceSettingsSchema } from "./prompt-enhance.js";
- import { CONFIG_BACKUP_DEFAULT_FILENAME } from "./config-backup.js";
- import { remoteRuntimeAssetSettingsSchema } from "./source-server/release.js";
-@@ -579,6 +583,7 @@ const appSettingsObjectSchema = z.object({
-   onboardingOccupation: appSettingsOccupationSchema.nullish(),
-   proactiveSuggestionsEnabled: z.boolean().optional(),
-   promptEnhance: promptEnhanceSettingsSchema,
-+  contextCompression: contextCompressionSettingsSchema,
-   memoryEnabled: z.boolean().default(false),
-   managedSystemRoleEnabled: z.boolean().default(false),
-   lastWorkspaceSession: z.array(appWorkspaceSessionEntrySchema).default([]),
-@@ -702,6 +707,7 @@ export const appSettingsPatchSchema = z.object({
-     .nullish(),
-   proactiveSuggestionsEnabled: z.boolean().optional(),
-   promptEnhance: promptEnhanceSettingsPatchSchema.optional(),
-+  contextCompression: contextCompressionSettingsPatchSchema.optional(),
-   memoryEnabled: z.boolean().optional(),
-   managedSystemRoleEnabled: z.boolean().optional(),
-   lastWorkspaceSession: z.array(appWorkspaceSessionEntrySchema).optional(),
- diff --git a/packages/shared/src/zcode-protocol/index.ts b/packages/shared/src/zcode-protocol/index.ts
-index f00d0e80..e0c1cd23 100644
---- a/packages/shared/src/zcode-protocol/index.ts
-+++ b/packages/shared/src/zcode-protocol/index.ts
-@@ -84,6 +84,7 @@ import { browserClientModeSchema, browserCommandSchema } from "../browser-use/co
- import { browserCommandResultSchema } from "../browser-use/result.js";
- import { appToolSearchModeSchema } from "../app-runtime-preferences.js";
- import { integratedTerminalShellSelectionSchema } from "../validationAppSettings.js";
-+import { contextCompressionSettingsSchema } from "../context-compression.js";
- import { zcodeTaskModeSchema } from "../zcode-task-mode-schema.js";
- import { OFFICIAL_MCP_AUTH_PORT_FAILURE_REASONS } from "../official-mcp-auth.js";
- import {
-@@ -2048,6 +2049,7 @@ export type ZCodeSessionEventsParams = z.infer<typeof zcodeSessionEventsParamsSc
- export const zcodeSessionRuntimePreferencesScopeSchema = z.enum([
-   "runtime-materialization",
-   "user-execution",
-+  "compact-execution",
- ]);
- export type ZCodeSessionRuntimePreferencesScope = z.infer<
-   typeof zcodeSessionRuntimePreferencesScopeSchema
-@@ -2089,6 +2091,7 @@ export const zcodeSessionRuntimePreferencesResultSchema = z
-     memoryEnabled: z.boolean().default(false),
-     askUserQuestionAutoResolutionEnabled: z.boolean().default(true),
-     integratedTerminalShell: integratedTerminalShellSelectionSchema.optional(),
-+    contextCompression: contextCompressionSettingsSchema.nullable().optional(),
-     // 兼容旧 Host：缺少字段时在协议解析边界使用当前默认策略。
-     modelContextBudgetStrategy: zcodeModelContextBudgetStrategySchema.default(
-       DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
-@@ -2612,6 +2615,7 @@ export type ZCodeWorkspaceUpdateInteractionPreferencesResult = z.infer<
- export const zcodeModelIoPreferencesSchema = z
-   .object({
-     fullRetentionEnabled: z.boolean(),
-+    contextCompression: contextCompressionSettingsSchema.nullable().optional(),
-   })
-   .strict();
- export type ZCodeModelIoPreferences = z.infer<typeof zcodeModelIoPreferencesSchema>;
- diff --git a/packages/ui/src/Root.tsx b/packages/ui/src/Root.tsx
+diff --git a/packages/ui/src/Root.tsx b/packages/ui/src/Root.tsx
 index aa413cb1..064ee700 100644
 --- a/packages/ui/src/Root.tsx
 +++ b/packages/ui/src/Root.tsx
@@ -549,7 +464,8 @@ index aa413cb1..064ee700 100644
      services.botsService,
      services.zcodeAgentService,
    ]);
- diff --git a/packages/ui/src/SettingsPage.tsx b/packages/ui/src/SettingsPage.tsx
+
+diff --git a/packages/ui/src/SettingsPage.tsx b/packages/ui/src/SettingsPage.tsx
 index 07789cd1..4b19d318 100644
 --- a/packages/ui/src/SettingsPage.tsx
 +++ b/packages/ui/src/SettingsPage.tsx
@@ -575,7 +491,8 @@ index 07789cd1..4b19d318 100644
                          ) : activeSection === "promptEnhance" ? (
                            <PromptEnhanceSection
                              workspacePath={activeWorkspacePath}
- diff --git a/packages/ui/src/hooks/useSettingService.ts b/packages/ui/src/hooks/useSettingService.ts
+
+diff --git a/packages/ui/src/hooks/useSettingService.ts b/packages/ui/src/hooks/useSettingService.ts
 index 1d2d3462..da8f3d1e 100644
 --- a/packages/ui/src/hooks/useSettingService.ts
 +++ b/packages/ui/src/hooks/useSettingService.ts
@@ -600,7 +517,8 @@ index 1d2d3462..da8f3d1e 100644
          };
          const syncResults = await Promise.allSettled([
            zcodeAgentService.syncAppRuntimePreferences(preferences),
- diff --git a/packages/ui/src/i18n/locales/en-US.ts b/packages/ui/src/i18n/locales/en-US.ts
+
+diff --git a/packages/ui/src/i18n/locales/en-US.ts b/packages/ui/src/i18n/locales/en-US.ts
 index 77c1b20e..7c856ff3 100644
 --- a/packages/ui/src/i18n/locales/en-US.ts
 +++ b/packages/ui/src/i18n/locales/en-US.ts
@@ -631,7 +549,8 @@ index 77c1b20e..7c856ff3 100644
    "settings.promptEnhance.enabled.label": "Enable prompt enhancement",
    "settings.promptEnhance.enabled.description": "Turning this off hides the enhancement controls in the composer.",
    "settings.promptEnhance.mode.label": "Rewrite mode",
- diff --git a/packages/ui/src/i18n/locales/fa.ts b/packages/ui/src/i18n/locales/fa.ts
+
+diff --git a/packages/ui/src/i18n/locales/fa.ts b/packages/ui/src/i18n/locales/fa.ts
 index 26761abb..c7c05b94 100644
 --- a/packages/ui/src/i18n/locales/fa.ts
 +++ b/packages/ui/src/i18n/locales/fa.ts
@@ -662,7 +581,8 @@ index 26761abb..c7c05b94 100644
    "settings.promptEnhance.enabled.label": "فعال‌سازی بهبود پرامپت",
    "settings.promptEnhance.enabled.description": "با خاموش کردن این گزینه، ابزارهای بهبود از کادر نوشتن پنهان می‌شوند.",
    "settings.promptEnhance.mode.label": "حالت بازنویسی",
- diff --git a/packages/ui/src/i18n/locales/zh-CN.ts b/packages/ui/src/i18n/locales/zh-CN.ts
+
+diff --git a/packages/ui/src/i18n/locales/zh-CN.ts b/packages/ui/src/i18n/locales/zh-CN.ts
 index 2d2cedf1..3a6631fe 100644
 --- a/packages/ui/src/i18n/locales/zh-CN.ts
 +++ b/packages/ui/src/i18n/locales/zh-CN.ts
@@ -693,7 +613,8 @@ index 2d2cedf1..3a6631fe 100644
    "settings.promptEnhance.enabled.label": "启用提示词增强",
    "settings.promptEnhance.enabled.description": "关闭后输入框不再显示增强入口。",
    "settings.promptEnhance.mode.label": "改写模式",
- diff --git a/packages/ui/src/lib/settingsNavigation.ts b/packages/ui/src/lib/settingsNavigation.ts
+
+diff --git a/packages/ui/src/lib/settingsNavigation.ts b/packages/ui/src/lib/settingsNavigation.ts
 index 7f0a99ce..b46ca608 100644
 --- a/packages/ui/src/lib/settingsNavigation.ts
 +++ b/packages/ui/src/lib/settingsNavigation.ts
@@ -713,7 +634,8 @@ index 7f0a99ce..b46ca608 100644
      // 提示词增强已有独立设置页；合法值校验需同步接入，避免跳转和偏好恢复退回常规页。
      value === "promptEnhance" ||
      // #79：分区渲染、一次性导航和持久偏好必须接受同一组合法 ID；否则设备管理
- diff --git a/packages/ui/src/settings/settingsPageConfig.ts b/packages/ui/src/settings/settingsPageConfig.ts
+
+diff --git a/packages/ui/src/settings/settingsPageConfig.ts b/packages/ui/src/settings/settingsPageConfig.ts
 index cbe776bd..f4d18f69 100644
 --- a/packages/ui/src/settings/settingsPageConfig.ts
 +++ b/packages/ui/src/settings/settingsPageConfig.ts
@@ -730,7 +652,8 @@ index cbe776bd..f4d18f69 100644
    {
      id: "promptEnhance",
      icon: Sparkles,
- diff --git a/packages/ui/test/settingsNavigation.test.ts b/packages/ui/test/settingsNavigation.test.ts
+
+diff --git a/packages/ui/test/settingsNavigation.test.ts b/packages/ui/test/settingsNavigation.test.ts
 index 87976ee5..df36ed08 100644
 --- a/packages/ui/test/settingsNavigation.test.ts
 +++ b/packages/ui/test/settingsNavigation.test.ts
@@ -773,3 +696,107 @@ index 87976ee5..df36ed08 100644
        );
      },
    );
+
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index f75c72ad..6f97b837 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -128,6 +128,7 @@ export * from "./channels.js";
+ export * from "./storage.js";
+ export * from "./config-backup.js";
+ export * from "./prompt-enhance.js";
++export * from "./context-compression.js";
+ export * from "./oauth.js";
+ export * from "./desktopMenu.js";
+ export * from "./feedback.js";
+
+diff --git a/packages/shared/src/protocol.ts b/packages/shared/src/protocol.ts
+index ccb55316..1de266ec 100644
+--- a/packages/shared/src/protocol.ts
++++ b/packages/shared/src/protocol.ts
+@@ -9,6 +9,7 @@ import type { DynamicWorkflowMode } from "./dynamic-workflow-feature.js";
+ import type { EmbeddedBrowserViewportPreference } from "./browser-use/command-metadata.js";
+ import type { AppToolSearchMode } from "./app-runtime-preferences.js";
+ import type { PromptEnhanceSettings } from "./prompt-enhance.js";
++import type { ContextCompressionSettings } from "./context-compression.js";
+ import type { ConfigBackupWebdavSettings } from "./config-backup.js";
+ 
+ // ── Domain types ──
+@@ -394,6 +395,8 @@ export interface AppSettings {
+   proactiveSuggestionsEnabled?: boolean;
+   /** 设置按浅合并写入，更新增强配置时须提交完整对象。 */
+   promptEnhance?: PromptEnhanceSettings;
++  /** 设置按浅合并写入；压缩使用独立模型时须提交完整对象。 */
++  contextCompression?: ContextCompressionSettings;
+   /** WebDAV 密码独立存入凭据服务，不写入此设置。 */
+   configBackupWebdav?: ConfigBackupWebdavSettings;
+   /** 新版只保存活动执行目录；不表达项目/连接成员，null 表示明确清空。 */
+
+diff --git a/packages/shared/src/validationAppSettings.ts b/packages/shared/src/validationAppSettings.ts
+index 094b9c86..ff6c2e30 100644
+--- a/packages/shared/src/validationAppSettings.ts
++++ b/packages/shared/src/validationAppSettings.ts
+@@ -1,6 +1,10 @@
+ /* oxlint-disable eslint(max-lines) -- AppSettings schema 聚合历史迁移、默认值和 patch 校验，拆分会削弱设置迁移的单一入口。 */
+ import { z } from "zod";
+ import { modelFallbackChainSchema } from "./model-selection.js";
++import {
++  contextCompressionSettingsPatchSchema,
++  contextCompressionSettingsSchema,
++} from "./context-compression.js";
+ import { promptEnhanceSettingsPatchSchema, promptEnhanceSettingsSchema } from "./prompt-enhance.js";
+ import { CONFIG_BACKUP_DEFAULT_FILENAME } from "./config-backup.js";
+ import { remoteRuntimeAssetSettingsSchema } from "./source-server/release.js";
+@@ -579,6 +583,7 @@ const appSettingsObjectSchema = z.object({
+   onboardingOccupation: appSettingsOccupationSchema.nullish(),
+   proactiveSuggestionsEnabled: z.boolean().optional(),
+   promptEnhance: promptEnhanceSettingsSchema,
++  contextCompression: contextCompressionSettingsSchema,
+   memoryEnabled: z.boolean().default(false),
+   managedSystemRoleEnabled: z.boolean().default(false),
+   lastWorkspaceSession: z.array(appWorkspaceSessionEntrySchema).default([]),
+@@ -702,6 +707,7 @@ export const appSettingsPatchSchema = z.object({
+     .nullish(),
+   proactiveSuggestionsEnabled: z.boolean().optional(),
+   promptEnhance: promptEnhanceSettingsPatchSchema.optional(),
++  contextCompression: contextCompressionSettingsPatchSchema.optional(),
+   memoryEnabled: z.boolean().optional(),
+   managedSystemRoleEnabled: z.boolean().optional(),
+   lastWorkspaceSession: z.array(appWorkspaceSessionEntrySchema).optional(),
+
+diff --git a/packages/shared/src/zcode-protocol/index.ts b/packages/shared/src/zcode-protocol/index.ts
+index f00d0e80..e0c1cd23 100644
+--- a/packages/shared/src/zcode-protocol/index.ts
++++ b/packages/shared/src/zcode-protocol/index.ts
+@@ -84,6 +84,7 @@ import { browserClientModeSchema, browserCommandSchema } from "../browser-use/co
+ import { browserCommandResultSchema } from "../browser-use/result.js";
+ import { appToolSearchModeSchema } from "../app-runtime-preferences.js";
+ import { integratedTerminalShellSelectionSchema } from "../validationAppSettings.js";
++import { contextCompressionSettingsSchema } from "../context-compression.js";
+ import { zcodeTaskModeSchema } from "../zcode-task-mode-schema.js";
+ import { OFFICIAL_MCP_AUTH_PORT_FAILURE_REASONS } from "../official-mcp-auth.js";
+ import {
+@@ -2048,6 +2049,7 @@ export type ZCodeSessionEventsParams = z.infer<typeof zcodeSessionEventsParamsSc
+ export const zcodeSessionRuntimePreferencesScopeSchema = z.enum([
+   "runtime-materialization",
+   "user-execution",
++  "compact-execution",
+ ]);
+ export type ZCodeSessionRuntimePreferencesScope = z.infer<
+   typeof zcodeSessionRuntimePreferencesScopeSchema
+@@ -2089,6 +2091,7 @@ export const zcodeSessionRuntimePreferencesResultSchema = z
+     memoryEnabled: z.boolean().default(false),
+     askUserQuestionAutoResolutionEnabled: z.boolean().default(true),
+     integratedTerminalShell: integratedTerminalShellSelectionSchema.optional(),
++    contextCompression: contextCompressionSettingsSchema.nullable().optional(),
+     // 兼容旧 Host：缺少字段时在协议解析边界使用当前默认策略。
+     modelContextBudgetStrategy: zcodeModelContextBudgetStrategySchema.default(
+       DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
+@@ -2612,6 +2615,7 @@ export type ZCodeWorkspaceUpdateInteractionPreferencesResult = z.infer<
+ export const zcodeModelIoPreferencesSchema = z
+   .object({
+     fullRetentionEnabled: z.boolean(),
++    contextCompression: contextCompressionSettingsSchema.nullable().optional(),
+   })
+   .strict();
+ export type ZCodeModelIoPreferences = z.infer<typeof zcodeModelIoPreferencesSchema>;
