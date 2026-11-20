@@ -1,4 +1,4 @@
- diff --git a/apps/zcode-cli/packages/bootstrap/src/app/input-facade.ts b/apps/zcode-cli/packages/bootstrap/src/app/input-facade.ts
+diff --git a/apps/zcode-cli/packages/bootstrap/src/app/input-facade.ts b/apps/zcode-cli/packages/bootstrap/src/app/input-facade.ts
 index 32e13499..dd94cd92 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/app/input-facade.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/app/input-facade.ts
