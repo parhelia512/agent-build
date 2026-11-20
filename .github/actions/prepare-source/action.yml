@@ -1,5 +1,5 @@
 name: Prepare patched ZCodium source
-description: Clone a ZCodium release tag, then apply the three port patches in order.
+description: Clone a ZCodium release tag, then apply the four port patches in order.
 
 inputs:
   repository:
@@ -49,6 +49,7 @@ runs:
           "01-personal-model-remote-models.patch"
           "02-prompt-enhance.patch"
           "03-compact-model-alignment.patch"
+          "04-context-compression-model.patch"
         )
 
         for patch in "${patches[@]}"; do
