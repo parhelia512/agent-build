@@ -9,7 +9,7 @@ index 32e13499..dd94cd92 100644
 +      compactModelSelection: options?.compactModelSelection,
      });
    };
-
+ 
 diff --git a/apps/zcode-cli/packages/bootstrap/src/app/types.ts b/apps/zcode-cli/packages/bootstrap/src/app/types.ts
 index 06c0d2aa..a2c4c9c6 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/app/types.ts
@@ -21,17 +21,17 @@ index 06c0d2aa..a2c4c9c6 100644
 +  /** 仅当前压缩请求使用的模型，不更新 Session Selection。 */
 +  compactModelSelection?: import("@zcode/shared").ModelSelection;
  }
-
+ 
  export type SubmitPromptOptions = SubmitPromptOptionsBase &
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
-index 5724973e..0b818aa5 100644
+index 5724973e..a2236fed 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
-@@ -135,17 +135,37 @@ export async function startManualCompact(
+@@ -135,17 +135,32 @@ export async function startManualCompact(
    // record.activeAbortController 中断。不登记 controller，压缩中的请求会跑到自然结束。
    record.activeAbortController = abortController;
    manualCompactControllers.add(abortController);
-+  const compactModelSelection = resolveConfiguredCompactModelSelection(host, record);
++  const compactModelSelection = resolveConfiguredCompactModelSelection(host);
    void runWithSessionResidencyFinalization(record, () =>
      runCompactTurnInBackground(host, record, {
        abortController,
@@ -43,29 +43,24 @@ index 5724973e..0b818aa5 100644
      // 后台 compact 的错误经事件流（CompactStarted/终态 marker）降级上报；兜底防 unhandled rejection。
    });
  }
-
+ 
 +function resolveConfiguredCompactModelSelection(
 +  host: V4CommandCoreHost,
-+  record: V4SessionRecordView,
 +): import("@zcode/shared").ModelSelection | undefined {
 +  const settings = host.contextCompression;
-+  const selection = settings?.channel === "custom" ? settings.customSelection : undefined;
-+  if (!selection) return undefined;
-+  const requested = settings.reasoningLevel;
-+  const reasoningLevel =
-+    requested && requested !== "default" && record.app.listThoughtLevels().includes(requested)
-+      ? requested
-+      : undefined;
++  if (settings?.channel !== "custom" || !settings.customSelection) return undefined;
++  const { customSelection, reasoningLevel } = settings;
 +  return {
-+    ...selection,
-+    ...(reasoningLevel ? { options: { reasoningLevel } } : {}),
++    ...customSelection,
++    // 推理强度由压缩模型决定，会话模型支持的强度不能用于过滤独立模型的配置。
++    ...(reasoningLevel === "default" ? {} : { options: { reasoningLevel } }),
 +  };
 +}
 +
  async function runCompactTurnInBackground(
    host: V4CommandCoreHost,
    record: V4SessionRecordView,
-@@ -153,6 +173,7 @@ async function runCompactTurnInBackground(
+@@ -153,6 +168,7 @@ async function runCompactTurnInBackground(
      abortController: AbortController;
      foregroundPromotionLeaseId?: string;
      inputId: string;
@@ -73,12 +68,8 @@ index 5724973e..0b818aa5 100644
    },
  ): Promise<void> {
    const startedAt = Date.now();
-@@ -164,9 +185,12 @@ async function runCompactTurnInBackground(
-     workspacePath: record.workspace.workspacePath,
-   });
-   try {
--    await record.app.submitPrompt("/compact", {
-+  await record.app.submitPrompt("/compact", {
+@@ -167,6 +183,9 @@ async function runCompactTurnInBackground(
+     await record.app.submitPrompt("/compact", {
        abortSignal: params.abortController.signal,
        inputId: params.inputId,
 +      ...(params.compactModelSelection
@@ -88,21 +79,25 @@ index 5724973e..0b818aa5 100644
    } catch (error) {
      lifecycleStatus = params.abortController.signal.aborted ? "cancelled" : "failed";
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
-index 514ffb34..e1a5c584 100644
+index 514ffb34..e9570bfa 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
-@@ -12,7 +12,7 @@ import type {
+@@ -12,7 +12,11 @@ import type {
    StableForkGoalBoundaryMetadata,
    TraceContext,
  } from "@zcode/contracts";
 -import type { DynamicWorkflowMode, ZCodeAutomationBotDeliveryTarget } from "@zcode/shared";
-+import type { DynamicWorkflowMode, ZCodeAutomationBotDeliveryTarget, ContextCompressionSettings } from "@zcode/shared";
++import type {
++  ContextCompressionSettings,
++  DynamicWorkflowMode,
++  ZCodeAutomationBotDeliveryTarget,
++} from "@zcode/shared";
  import type {
    CommandAck,
    CommandEnvelope,
-@@ -90,6 +90,7 @@ export interface V4SessionRecordView {
+@@ -90,6 +94,7 @@ export interface V4SessionRecordView {
  }
-
+ 
  export interface V4CommandCoreHost {
 +  contextCompression?: ContextCompressionSettings;
    /** 会话查找（同一注册表对象引用；不存在返回 undefined → handler 拒绝）。 */
@@ -121,58 +116,6 @@ index 1c047705..837cf02a 100644
    let updatedSessionCount = 0;
    for (const record of context.sessions.values()) {
      if (!record.app.setModelIoFullRetentionEnabled) continue;
-diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
-index 22421eff..62c92144 100644
---- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
-+++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
-@@ -164,8 +164,8 @@ type ZCodeSessionRecordParams = (
- interface SessionStartupPreferences {
-   additionalDirectories?: readonly string[];
-   subagentRuntimeConfigEnabled?: boolean;
--  memoryEnabled: boolean;
--  modelContextBudgetStrategy: ZCodeModelContextBudgetStrategy;
-+    memoryEnabled: boolean;
-+    modelContextBudgetStrategy: ZCodeModelContextBudgetStrategy;
-   nativeSearchEnhancementsEnabled: boolean;
-   toolSearchMode: AppToolSearchMode;
-   resolveInitialBashShellSelection: () => Promise<ExecutionShellSelection | undefined>;
-@@ -3347,13 +3347,13 @@ async function requestSessionRuntimePreferences(
-     if (error instanceof ProtocolRequestError && (error.code === -32601 || error.code === -32020)) {
-       // 兼容旧 Host 或无 Host 的纯 CLI 创建路径；Memory 服从产品默认关闭，
-       // 增强搜索维持原有默认开启，其他协议/传输错误仍阻止 runtime 创建。
--      return {
--        askUserQuestionAutoResolutionEnabled: true,
--        memoryEnabled: false,
--        modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
--        nativeSearchEnhancementsEnabled: true,
--        toolSearchMode: "off",
--      };
-+        return {
-+          askUserQuestionAutoResolutionEnabled: true,
-+          memoryEnabled: false,
-+          modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
-+          nativeSearchEnhancementsEnabled: true,
-+          toolSearchMode: "off",
-+        };
-     }
-     throw error;
-   }
-@@ -3389,10 +3389,11 @@ async function resolveSessionStartupPreferences(
-   await context.v4Interactions.initializeAskUserQuestionAutoResolutionEnabled(
-     runtimePreferences.askUserQuestionAutoResolutionEnabled,
-   );
--  return {
--    additionalDirectories: runtimePreferences.additionalDirectories,
--    subagentRuntimeConfigEnabled: runtimePreferences.subagentRuntimeConfigEnabled,
--    memoryEnabled: runtimePreferences.memoryEnabled,
-+    return {
-+      additionalDirectories: runtimePreferences.additionalDirectories,
-+      subagentRuntimeConfigEnabled: runtimePreferences.subagentRuntimeConfigEnabled,
-+      memoryEnabled: runtimePreferences.memoryEnabled,
-+
-     modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
-     nativeSearchEnhancementsEnabled: runtimePreferences.nativeSearchEnhancementsEnabled,
-     toolSearchMode: runtimePreferences.toolSearchMode,
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
 index 7f6c5430..a705f665 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
@@ -212,18 +155,15 @@ index e40409a7..9080f165 100644
      getRecord: (sessionId) => context.sessions.get(sessionId),
      // 同一登记表实例：broker（旧目录）注册反向请求 deferred，
 diff --git a/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts b/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
-index 3986ba16..6702cdd7 100644
+index 3986ba16..fc32d49a 100644
 --- a/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
 +++ b/apps/zcode-cli/packages/bootstrap/tests/v4-native-goal-compact.test.ts
-@@ -81,7 +81,33 @@ async function settle() {
+@@ -81,6 +81,31 @@ async function settle() {
  }
-
+ 
  describe("v4 原生 compact", () => {
--  it("正路径：后台 submitPrompt('/compact') + 上锁 + ready 边界释放", async () => {
 +  it("custom compression model is passed only to the compact request", async () => {
-+    const app = makeApp({
-+      listThoughtLevels: vi.fn().mockReturnValue(["low", "medium", "high"]),
-+    });
++    const app = makeApp();
 +    const record = makeRecord({ app });
 +    const host = makeHost(record, {
 +      contextCompression: {
@@ -247,24 +187,16 @@ index 3986ba16..6702cdd7 100644
 +    expect(app.runtime.setExecutionState).not.toHaveBeenCalled();
 +  });
 +
+   it("正路径：后台 submitPrompt('/compact') + 上锁 + ready 边界释放", async () => {
      let finishCompact!: () => void;
      const compactGate = new Promise<Record<string, never>>((resolve) => {
-       finishCompact = () => resolve({});
 diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
-index 22a30b77..ac9b9fbd 100644
+index 22a30b77..6aadb193 100644
 --- a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
 +++ b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
-@@ -41,6 +41,7 @@ import {
-   buildUserContentFromTurn,
-   logResolvedTurnAttachments,
-   resolveTurnAttachments,
-+  summarizeResolvedTurnAttachmentsForEvent,
-   summarizeTurnAttachmentsForEvent,
-   runtimeMetadataForSyntheticUserMessageSource,
- } from "../helpers/index.js";
-@@ -412,13 +413,26 @@ export async function executeTurnCommand(
+@@ -412,13 +412,27 @@ export async function executeTurnCommand(
        }
-
+ 
        if (compactInstructions !== null) {
 -        const compactModel = await applySubmissionExecutionState(
 -          this,
@@ -285,41 +217,18 @@ index 22a30b77..ac9b9fbd 100644
 +            });
 +          }
 +        } else {
-+          compactModel = (await applySubmissionExecutionState(
-+            this,
-+            options?.intent,
-+            turnTraceContext,
-+            options?.modelExecution,
-+            admittedModel,
-+          )) ?? admittedModel;
++          compactModel =
++            (await applySubmissionExecutionState(
++              this,
++              options?.intent,
++              turnTraceContext,
++              options?.modelExecution,
++              admittedModel,
++            )) ?? admittedModel;
 +        }
          return this.executeManualCompact(
            input,
            compactInstructions,
-@@ -623,6 +637,7 @@ export async function executeTurnCommand(
-           workingDirectory: this.workingDirectory,
-         });
-         logResolvedTurnAttachments(this.logger, turnTraceContext, resolvedAttachments);
-+        const resolvedAttachmentMetas = summarizeResolvedTurnAttachmentsForEvent(resolvedAttachments);
-         const sharedContextRefs = options?.sharedContextRefs ?? options?.intent?.sharedContextRefs;
-         if (sharedContextRefs && sharedContextRefs.length > 0) {
-           const [reference] = sharedContextRefs;
-@@ -725,6 +740,15 @@ export async function executeTurnCommand(
-             },
-           );
-         }
-+        if (resolvedAttachmentMetas) {
-+          const attachmentsResolvedEvent = this.createEvent(
-+            SessionEventType.TurnAttachmentsResolved,
-+            { attachments: resolvedAttachmentMetas },
-+            turnTraceContext,
-+          );
-+          await this.appendEvent(attachmentsResolvedEvent, turnTraceContext);
-+          events.push(attachmentsResolvedEvent);
-+        }
-         if (creationFailure) {
-           // 已接纳输入已随 TurnStarted 和用户消息落库；不准备 Agent、不生成标题、不请求模型，
-           // 终态由下方 catch 统一写入。
 diff --git a/apps/zcode-cli/packages/core/src/runtime/types.ts b/apps/zcode-cli/packages/core/src/runtime/types.ts
 index ae42ea6d..891bffcc 100644
 --- a/apps/zcode-cli/packages/core/src/runtime/types.ts
@@ -331,17 +240,16 @@ index ae42ea6d..891bffcc 100644
 +  /** 仅当前压缩请求使用的模型，不更新 Session Selection。 */
 +  compactModelSelection?: ModelSelection;
  }
-
+ 
  export type ExecuteTurnOptions = ExecuteTurnOptionsBase &
 diff --git a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
-index cb358871..4df16ece 100644
+index cb358871..d9813c89 100644
 --- a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
 +++ b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
-@@ -561,7 +561,48 @@ describe("runtime compact helpers", () => {
+@@ -561,6 +561,51 @@ describe("runtime compact helpers", () => {
  });
-
+ 
  describe("AgentRuntime manual compact", () => {
--  it("applies force MCS to Full Compact when the Active Model property is false", async () => {
 +  it("uses a custom compression model without changing the session model selection", async () => {
 +    const requests: Array<{ providerId: string; modelId: string; reasoningLevel?: string }> = [];
 +    const runtime = createTestAgentRuntime(
@@ -377,63 +285,19 @@ index cb358871..4df16ece 100644
 +        reasoningLevel: "high",
 +      }),
 +    });
-+    expect(requests.some((request) => request.providerId === "compression-provider" &&
-+      request.modelId === "compression-model" && request.reasoningLevel === "high")).toBe(true);
++    expect(requests).toContainEqual({
++      providerId: "compression-provider",
++      modelId: "compression-model",
++      reasoningLevel: "high",
++    });
 +    expect(runtime.getSessionModelSelection()).toEqual(
 +      createTestModelSelection("session-provider/session-model"),
 +    );
 +  });
 +
+   it("applies force MCS to Full Compact when the Active Model property is false", async () => {
      const compactRequests: ModelRequest[] = [];
      const runtime = createTestAgentRuntime(
-       createSessionId("runtime-full-compact-force-mcs"),
-diff --git a/packages/services/src/node.ts b/packages/services/src/node.ts
-index 7f715c19..9a2963a2 100644
---- a/packages/services/src/node.ts
-+++ b/packages/services/src/node.ts
-@@ -417,6 +417,12 @@ import { IGitCheckpointService } from "./git/gitCheckpoint.js";
- import { ISystemService } from "./system/system.js";
- import { ITerminalService } from "./terminal/terminal.js";
- import { ISettingService } from "./setting/setting.js";
-+import { createConfigBackupService } from "./config-backup/configBackupService.js";
-+import {
-+  createUnsupportedConfigBackupService,
-+  IConfigBackupService,
-+} from "./config-backup/configBackup.js";
-+export { createConfigBackupService, createUnsupportedConfigBackupService };
- import { IOnboardingRecordService } from "./onboarding/onboardingRecord.js";
- import { ICredentialService } from "./credential/credential.js";
- import { IBroadcastService } from "./broadcast/broadcast.js";
-@@ -2450,6 +2456,7 @@ export function createLocalServices(options: {
-               nativeSearchEnhancementsEnabled: settings.nativeSearchEnhancementsEnabled !== false,
-               toolSearchMode: settings.toolSearchMode ?? "off",
-               memoryEnabled: settings.memoryEnabled === true,
-+              contextCompression: settings.contextCompression,
-               modelContextBudgetStrategy,
-               // user-execution 只消费 Shell；共享默认策略是统一 result schema 的兼容占位，
-               // 不会覆盖 runtime-materialization 阶段已经固定的 strategy。
-@@ -2652,6 +2659,13 @@ export function createLocalServices(options: {
-       return tokenSet?.zcodeJwtToken ?? tokenSet?.accessToken ?? null;
-     },
-   });
-+  const configBackupService = isDesktopAttachedRemote
-+    ? createUnsupportedConfigBackupService()
-+    : createConfigBackupService({
-+        settingService,
-+        personalRepository: providerConfigRuntime.personalRepository,
-+        apiClient,
-+      });
-   const conversationShareService: IConversationShareServiceType = isDesktopAttachedRemote
-     ? createUnsupportedConversationShareService({
-         message: "Conversation publishing is not available for remote workspaces",
-@@ -2694,6 +2708,7 @@ export function createLocalServices(options: {
-     .register(ISystemService, systemService)
-     .register(ITerminalService, createTerminalService({ settingService }))
-     .register(ISettingService, settingService)
-+    .register(IConfigBackupService, configBackupService)
-     .register(IOnboardingRecordService, onboardingRecordService)
-     .register(ICredentialService, credentialService)
-     .register(IBroadcastService, broadcastService)
 diff --git a/packages/services/src/zcode-agent/zcodeAgent.ts b/packages/services/src/zcode-agent/zcodeAgent.ts
 index 4963b066..eecf3f72 100644
 --- a/packages/services/src/zcode-agent/zcodeAgent.ts
@@ -444,7 +308,7 @@ index 4963b066..eecf3f72 100644
    modelIoFullRetentionEnabled?: boolean;
 +  contextCompression?: import("@zcode/shared").ContextCompressionSettings | null;
  }
-
+ 
  export interface ZCodeAgentLocalRuntimeChildProcesses {
 diff --git a/packages/services/src/zcode-agent/zcodeAgentService.ts b/packages/services/src/zcode-agent/zcodeAgentService.ts
 index d28cb45a..bdf97613 100644
@@ -475,7 +339,7 @@ index 24a2aa75..b93a228b 100644
 @@ -1,4 +1,5 @@
  import { z } from "zod";
 +import { contextCompressionSettingsSchema } from "./context-compression.js";
-
+ 
  export const appToolSearchModeSchema = z.enum(["auto", "local", "off"]);
  export type AppToolSearchMode = z.infer<typeof appToolSearchModeSchema>;
 @@ -10,6 +11,7 @@ export const appRuntimePreferencesChangedBroadcastPayloadSchema = z
@@ -485,7 +349,7 @@ index 24a2aa75..b93a228b 100644
 +    contextCompression: contextCompressionSettingsSchema.nullable().optional(),
    })
    .strict();
-
+ 
 diff --git a/packages/shared/src/context-compression.test.ts b/packages/shared/src/context-compression.test.ts
 new file mode 100644
 index 00000000..a2a7d15b
@@ -579,165 +443,71 @@ index 00000000..5aa2710e
 +  return resolveContextCompressionSettings({ ...current, ...patch });
 +}
 diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
-index 3760a7f8..6f97b837 100644
+index 3760a7f8..121dc939 100644
 --- a/packages/shared/src/index.ts
 +++ b/packages/shared/src/index.ts
-@@ -126,7 +126,9 @@ export interface ICredentialStore {
- export * from "./test-ids-workflow.js";
+@@ -127,6 +127,7 @@ export * from "./test-ids-workflow.js";
  export * from "./channels.js";
  export * from "./storage.js";
-+export * from "./config-backup.js";
  export * from "./prompt-enhance.js";
 +export * from "./context-compression.js";
  export * from "./oauth.js";
  export * from "./desktopMenu.js";
  export * from "./feedback.js";
 diff --git a/packages/shared/src/protocol.ts b/packages/shared/src/protocol.ts
-index e126ed8e..1de266ec 100644
+index e126ed8e..1cab8bd0 100644
 --- a/packages/shared/src/protocol.ts
 +++ b/packages/shared/src/protocol.ts
-@@ -9,6 +9,8 @@ import type { DynamicWorkflowMode } from "./dynamic-workflow-feature.js";
+@@ -9,6 +9,7 @@ import type { DynamicWorkflowMode } from "./dynamic-workflow-feature.js";
  import type { EmbeddedBrowserViewportPreference } from "./browser-use/command-metadata.js";
  import type { AppToolSearchMode } from "./app-runtime-preferences.js";
  import type { PromptEnhanceSettings } from "./prompt-enhance.js";
 +import type { ContextCompressionSettings } from "./context-compression.js";
-+import type { ConfigBackupWebdavSettings } from "./config-backup.js";
-
+ 
  // ── Domain types ──
-
-@@ -333,6 +335,8 @@ export interface AppSettings {
-   messageStreamShowReasoningMigrationInitialized?: boolean;
-   /** 是否在消息流中展示 todo 工具渲染；不影响摘要面板的 todo */
-   messageStreamShowTodos?: boolean;
-+  /** 仅控制输入框本轮生成指标的展示，不影响运行时指标投影。 */
-+  composerTurnMetricsVisible?: boolean;
-   /** 是否把连续的只读工具调用聚合成 Explore。 */
-   toolGroupingExploreEnabled?: boolean;
-   /** 是否把连续的非只读 Shell 工具调用聚合成 Terminal。 */
-@@ -341,6 +345,8 @@ export interface AppSettings {
-   toolGroupingChangesEnabled?: boolean;
-   /** ZCode 运行中继续输入时，是排队到下一轮，还是引导到下一次工具调用后运行 */
-   zcodeInteractionBehavior?: ZCodeInteractionBehavior;
-+  /** 键使用 workspaceIdentity?.trim() || workspacePath，按顺序在当前回合切换备用模型。 */
-+  modelFallbackByWorkspace?: Record<string, Array<{ providerId: string; modelId: string }>>;
-   /** Agent 提问五分钟无人回答时是否允许自动继续；缺失按开启兼容旧配置。 */
-   askUserQuestionAutoResolutionEnabled?: boolean;
-   /** 是否完整保留 Model I/O；开启后不轮转、不限额重置、不压缩或裁剪，鉴权信息仍会脱敏。 */
-@@ -368,6 +374,8 @@ export interface AppSettings {
-   toolSearchMode?: AppToolSearchMode;
-   /** 新建或冷恢复 Session 是否启用 Memory；默认关闭。 */
-   memoryEnabled?: boolean;
-+  /** 新会话是否使用用户数据目录中的系统角色文件，默认关闭。 */
-+  managedSystemRoleEnabled?: boolean;
-   onboardingOccupation?:
-     | "office"
-     | "developer"
-@@ -385,7 +393,12 @@ export interface AppSettings {
-     | "other"
+ 
+@@ -386,6 +387,8 @@ export interface AppSettings {
      | null;
    proactiveSuggestionsEnabled?: boolean;
-+  /** 设置按浅合并写入，更新增强配置时须提交完整对象。 */
    promptEnhance?: PromptEnhanceSettings;
 +  /** 设置按浅合并写入；压缩使用独立模型时须提交完整对象。 */
 +  contextCompression?: ContextCompressionSettings;
-+  /** WebDAV 密码独立存入凭据服务，不写入此设置。 */
-+  configBackupWebdav?: ConfigBackupWebdavSettings;
    /** 新版只保存活动执行目录；不表达项目/连接成员，null 表示明确清空。 */
    lastActiveWorkspace?: PersistedWorkspaceSessionEntry | null;
    /** Host 从项目/本机入口派生，供旧版降级读取；新版不作为入口真相。 */
 diff --git a/packages/shared/src/validationAppSettings.ts b/packages/shared/src/validationAppSettings.ts
-index 542cf40d..ff6c2e30 100644
+index 542cf40d..ce083f7d 100644
 --- a/packages/shared/src/validationAppSettings.ts
 +++ b/packages/shared/src/validationAppSettings.ts
-@@ -1,6 +1,12 @@
+@@ -1,6 +1,10 @@
  /* oxlint-disable eslint(max-lines) -- AppSettings schema 聚合历史迁移、默认值和 patch 校验，拆分会削弱设置迁移的单一入口。 */
  import { z } from "zod";
-+import { modelFallbackChainSchema } from "./model-selection.js";
+ import { promptEnhanceSettingsPatchSchema, promptEnhanceSettingsSchema } from "./prompt-enhance.js";
 +import {
 +  contextCompressionSettingsPatchSchema,
 +  contextCompressionSettingsSchema,
 +} from "./context-compression.js";
- import { promptEnhanceSettingsPatchSchema, promptEnhanceSettingsSchema } from "./prompt-enhance.js";
-+import { CONFIG_BACKUP_DEFAULT_FILENAME } from "./config-backup.js";
  import { remoteRuntimeAssetSettingsSchema } from "./source-server/release.js";
  import { appToolSearchModeSchema } from "./app-runtime-preferences.js";
  import type { AppSettings } from "./protocol.js";
-@@ -41,6 +47,13 @@ const appSettingsOccupationSchema = z.enum([
- export const appSettingsOccupationEnum = appSettingsOccupationSchema;
-
- const nonEmptyStringSchema = z.string().trim().min(1);
-+const configBackupWebdavSettingsSchema = z
-+  .object({
-+    url: nonEmptyStringSchema,
-+    username: z.string().default(""),
-+    remotePath: z.string().trim().min(1).default(CONFIG_BACKUP_DEFAULT_FILENAME),
-+  })
-+  .strict();
-
- export const localeSchema = z.enum(["zh-CN", "en-US", "fa-IR"]);
- export const localePreferenceSchema = z.enum(["system", "zh-CN", "en-US", "fa-IR"]);
-@@ -545,10 +558,12 @@ const appSettingsObjectSchema = z.object({
-   messageStreamShowReasoning: z.boolean().default(true),
-   messageStreamShowReasoningMigrationInitialized: z.boolean().default(true),
-   messageStreamShowTodos: z.boolean().default(false),
-+  composerTurnMetricsVisible: z.boolean().default(true),
-   toolGroupingExploreEnabled: z.boolean().default(true),
-   toolGroupingTerminalEnabled: z.boolean().default(true),
-   toolGroupingChangesEnabled: z.boolean().default(false),
-   zcodeInteractionBehavior: zcodeInteractionBehaviorSchema.default("queue"),
-+  modelFallbackByWorkspace: z.record(z.string(), modelFallbackChainSchema).optional(),
-   askUserQuestionAutoResolutionEnabled: z.boolean().default(true),
-   modelIoFullRetentionEnabled: z.boolean().default(false),
-   dynamicWorkflowMode: dynamicWorkflowModeSettingSchema,
-@@ -568,7 +583,9 @@ const appSettingsObjectSchema = z.object({
+@@ -568,6 +572,7 @@ const appSettingsObjectSchema = z.object({
    onboardingOccupation: appSettingsOccupationSchema.nullish(),
    proactiveSuggestionsEnabled: z.boolean().optional(),
    promptEnhance: promptEnhanceSettingsSchema,
 +  contextCompression: contextCompressionSettingsSchema,
    memoryEnabled: z.boolean().default(false),
-+  managedSystemRoleEnabled: z.boolean().default(false),
    lastWorkspaceSession: z.array(appWorkspaceSessionEntrySchema).default([]),
    lastActiveWorkspace: appWorkspaceSessionEntrySchema.nullable().optional(),
-   remoteConversationWorkspaceBySourceServerId: z
-@@ -596,6 +613,7 @@ const appSettingsObjectSchema = z.object({
-   webRemoteControlExternalRelayDevice: webRemoteControlExternalRelayDeviceSchema.optional(),
-   webRemoteControlLastEnabledContext: webRemoteControlLastEnabledContextSchema.optional(),
-   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
-+  configBackupWebdav: configBackupWebdavSettingsSchema.optional(),
-   // 官方服务开关必须登记在存储 schema 里：只进 patch schema 会在写盘时被 zod strip，
-   // 开关看起来能切但永远读不回来，UI 表现为点击后立刻回弹。
-   officialServices: officialServiceSwitchesSchema.optional(),
-@@ -650,10 +668,12 @@ export const appSettingsPatchSchema = z.object({
-   messageStreamShowReasoning: z.boolean().optional(),
-   messageStreamShowReasoningMigrationInitialized: z.boolean().optional(),
-   messageStreamShowTodos: z.boolean().optional(),
-+  composerTurnMetricsVisible: z.boolean().optional(),
-   toolGroupingExploreEnabled: z.boolean().optional(),
-   toolGroupingTerminalEnabled: z.boolean().optional(),
-   toolGroupingChangesEnabled: z.boolean().optional(),
-   zcodeInteractionBehavior: zcodeInteractionBehaviorSchema.optional(),
-+  modelFallbackByWorkspace: z.record(z.string(), modelFallbackChainSchema).optional(),
-   askUserQuestionAutoResolutionEnabled: z.boolean().optional(),
-   modelIoFullRetentionEnabled: z.boolean().optional(),
-   // 空串是「删除选择、回到跟随」的哨兵：RPC 会吞掉 undefined，normalizeSettingsPatch 把它归一成删除。
-@@ -687,7 +707,9 @@ export const appSettingsPatchSchema = z.object({
+@@ -687,6 +692,7 @@ export const appSettingsPatchSchema = z.object({
      .nullish(),
    proactiveSuggestionsEnabled: z.boolean().optional(),
    promptEnhance: promptEnhanceSettingsPatchSchema.optional(),
 +  contextCompression: contextCompressionSettingsPatchSchema.optional(),
    memoryEnabled: z.boolean().optional(),
-+  managedSystemRoleEnabled: z.boolean().optional(),
    lastWorkspaceSession: z.array(appWorkspaceSessionEntrySchema).optional(),
    lastActiveWorkspace: appWorkspaceSessionEntrySchema.nullable().optional(),
-   remoteConversationWorkspaceBySourceServerId: z
-@@ -715,4 +737,5 @@ export const appSettingsPatchSchema = z.object({
-   webRemoteControlExternalRelayDevice: webRemoteControlExternalRelayDeviceSchema.optional(),
-   webRemoteControlLastEnabledContext: webRemoteControlLastEnabledContextSchema.optional(),
-   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
-+  configBackupWebdav: configBackupWebdavSettingsSchema.optional(),
- });
 diff --git a/packages/shared/src/zcode-protocol/index.ts b/packages/shared/src/zcode-protocol/index.ts
-index f00d0e80..e0c1cd23 100644
+index f00d0e80..a43ce89e 100644
 --- a/packages/shared/src/zcode-protocol/index.ts
 +++ b/packages/shared/src/zcode-protocol/index.ts
 @@ -84,6 +84,7 @@ import { browserClientModeSchema, browserCommandSchema } from "../browser-use/co
@@ -748,23 +518,7 @@ index f00d0e80..e0c1cd23 100644
  import { zcodeTaskModeSchema } from "../zcode-task-mode-schema.js";
  import { OFFICIAL_MCP_AUTH_PORT_FAILURE_REASONS } from "../official-mcp-auth.js";
  import {
-@@ -2048,6 +2049,7 @@ export type ZCodeSessionEventsParams = z.infer<typeof zcodeSessionEventsParamsSc
- export const zcodeSessionRuntimePreferencesScopeSchema = z.enum([
-   "runtime-materialization",
-   "user-execution",
-+  "compact-execution",
- ]);
- export type ZCodeSessionRuntimePreferencesScope = z.infer<
-   typeof zcodeSessionRuntimePreferencesScopeSchema
-@@ -2089,6 +2091,7 @@ export const zcodeSessionRuntimePreferencesResultSchema = z
-     memoryEnabled: z.boolean().default(false),
-     askUserQuestionAutoResolutionEnabled: z.boolean().default(true),
-     integratedTerminalShell: integratedTerminalShellSelectionSchema.optional(),
-+    contextCompression: contextCompressionSettingsSchema.nullable().optional(),
-     // 兼容旧 Host：缺少字段时在协议解析边界使用当前默认策略。
-     modelContextBudgetStrategy: zcodeModelContextBudgetStrategySchema.default(
-       DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
-@@ -2612,6 +2615,7 @@ export type ZCodeWorkspaceUpdateInteractionPreferencesResult = z.infer<
+@@ -2612,6 +2613,7 @@ export type ZCodeWorkspaceUpdateInteractionPreferencesResult = z.infer<
  export const zcodeModelIoPreferencesSchema = z
    .object({
      fullRetentionEnabled: z.boolean(),
@@ -852,14 +606,13 @@ index 1d2d3462..da8f3d1e 100644
          const syncResults = await Promise.allSettled([
            zcodeAgentService.syncAppRuntimePreferences(preferences),
 diff --git a/packages/ui/src/i18n/locales/en-US.ts b/packages/ui/src/i18n/locales/en-US.ts
-index 77c1b20e..7c856ff3 100644
+index 77c1b20e..9ba0b39e 100644
 --- a/packages/ui/src/i18n/locales/en-US.ts
 +++ b/packages/ui/src/i18n/locales/en-US.ts
-@@ -5308,7 +5308,25 @@ const enUS: Record<string, string> = {
-   "chat.history.duration.second": "s",
+@@ -5309,6 +5309,25 @@ const enUS: Record<string, string> = {
    "chat.stop": "Stop",
    "chat.stop.short": "Stop",
--  "settings.promptEnhance.title": "Prompt enhancement",
+   "settings.promptEnhance.title": "Prompt enhancement",
 +  "settings.contextCompression.title": "Context compression",
 +  "settings.contextCompression.channel.label": "Model channel",
 +  "settings.contextCompression.channel.auto": "Automatic",
@@ -883,14 +636,13 @@ index 77c1b20e..7c856ff3 100644
    "settings.promptEnhance.enabled.description": "Turning this off hides the enhancement controls in the composer.",
    "settings.promptEnhance.mode.label": "Rewrite mode",
 diff --git a/packages/ui/src/i18n/locales/fa.ts b/packages/ui/src/i18n/locales/fa.ts
-index 26761abb..c7c05b94 100644
+index 26761abb..a84fab18 100644
 --- a/packages/ui/src/i18n/locales/fa.ts
 +++ b/packages/ui/src/i18n/locales/fa.ts
-@@ -4266,7 +4266,25 @@ const faIR: Record<string, string> = {
-   "chat.history.duration.second": "ثانیه",
+@@ -4267,6 +4267,25 @@ const faIR: Record<string, string> = {
    "chat.stop": "توقف",
    "chat.stop.short": "توقف",
--  "settings.promptEnhance.title": "بهبود پرامپت",
+   "settings.promptEnhance.title": "بهبود پرامپت",
 +  "settings.contextCompression.title": "فشرده‌سازی زمینه",
 +  "settings.contextCompression.channel.label": "کانال مدل",
 +  "settings.contextCompression.channel.auto": "خودکار",
@@ -914,14 +666,13 @@ index 26761abb..c7c05b94 100644
    "settings.promptEnhance.enabled.description": "با خاموش کردن این گزینه، ابزارهای بهبود از کادر نوشتن پنهان می‌شوند.",
    "settings.promptEnhance.mode.label": "حالت بازنویسی",
 diff --git a/packages/ui/src/i18n/locales/zh-CN.ts b/packages/ui/src/i18n/locales/zh-CN.ts
-index 2d2cedf1..3a6631fe 100644
+index 2d2cedf1..e298e7d7 100644
 --- a/packages/ui/src/i18n/locales/zh-CN.ts
 +++ b/packages/ui/src/i18n/locales/zh-CN.ts
-@@ -4979,7 +4979,25 @@ const zhCN: Record<string, string> = {
-   "chat.history.duration.second": "秒",
+@@ -4980,6 +4980,25 @@ const zhCN: Record<string, string> = {
    "chat.stop": "停止生成",
    "chat.stop.short": "停止",
--  "settings.promptEnhance.title": "提示词增强",
+   "settings.promptEnhance.title": "提示词增强",
 +  "settings.contextCompression.title": "上下文压缩",
 +  "settings.contextCompression.channel.label": "模型通道",
 +  "settings.contextCompression.channel.auto": "自动",
@@ -966,10 +717,10 @@ index 7f0a99ce..b46ca608 100644
      // #79：分区渲染、一次性导航和持久偏好必须接受同一组合法 ID；否则设备管理
 diff --git a/packages/ui/src/settings/ContextCompressionSection.tsx b/packages/ui/src/settings/ContextCompressionSection.tsx
 new file mode 100644
-index 00000000..c55e7066
+index 00000000..e2083c2f
 --- /dev/null
 +++ b/packages/ui/src/settings/ContextCompressionSection.tsx
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,210 @@
 +import { useMemo, useState } from "react";
 +import {
 +  contextCompressionChannels,
@@ -978,7 +729,13 @@ index 00000000..c55e7066
 +  resolveContextCompressionSettings,
 +  type ContextCompressionSettings,
 +} from "@zcode/shared";
-+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select.js";
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from "@/components/ui/select.js";
 +import { toast } from "@/components/ui/toast.js";
 +import { useModelSelectionView } from "@/hooks/useModelSelectionView.js";
 +import { useSettings } from "@/hooks/useSettingService.js";
@@ -1012,7 +769,8 @@ index 00000000..c55e7066
 +    remoteTarget,
 +    { selection: null },
 +  );
-+  const selectionView = modelSelectionRead.state.status === "ready" ? modelSelectionRead.state.view : null;
++  const selectionView =
++    modelSelectionRead.state.status === "ready" ? modelSelectionRead.state.view : null;
 +  const providers = selectionView?.providers ?? [];
 +  const customProvider = providers.find(
 +    (provider) => provider.providerId === current.customSelection?.providerId,
@@ -1073,7 +831,11 @@ index 00000000..c55e7066
 +                  }}
 +                >
 +                  <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
-+                    <SelectValue placeholder={intl.formatMessage({ id: "settings.contextCompression.channel.providerPlaceholder" })} />
++                    <SelectValue
++                      placeholder={intl.formatMessage({
++                        id: "settings.contextCompression.channel.providerPlaceholder",
++                      })}
++                    />
 +                  </SelectTrigger>
 +                  <SelectContent>
 +                    {providers.map((provider) => (
@@ -1098,16 +860,24 @@ index 00000000..c55e7066
 +                  }}
 +                >
 +                  <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
-+                    <SelectValue placeholder={intl.formatMessage({ id: "settings.contextCompression.channel.modelPlaceholder" })} />
++                    <SelectValue
++                      placeholder={intl.formatMessage({
++                        id: "settings.contextCompression.channel.modelPlaceholder",
++                      })}
++                    />
 +                  </SelectTrigger>
 +                  <SelectContent>
 +                    {(customProvider?.models ?? []).map((model) => (
-+                      <SelectItem key={model.modelId} value={model.modelId}>{model.modelId}</SelectItem>
++                      <SelectItem key={model.modelId} value={model.modelId}>
++                        {model.modelId}
++                      </SelectItem>
 +                    ))}
 +                  </SelectContent>
 +                </Select>
 +              }
 +            />
++          </>
++        ) : null}
 +        {current.channel === "auto" ? (
 +          <SettingsRow
 +            controlLayout="wide"
@@ -1129,10 +899,14 @@ index 00000000..c55e7066
 +                value={current.reasoningLevel}
 +                disabled={disabled}
 +                onValueChange={(reasoningLevel) =>
-+                  void write({ reasoningLevel: reasoningLevel as ContextCompressionSettings["reasoningLevel"] })
++                  void write({
++                    reasoningLevel: reasoningLevel as ContextCompressionSettings["reasoningLevel"],
++                  })
 +                }
 +              >
-+                <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64"><SelectValue /></SelectTrigger>
++                <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
++                  <SelectValue />
++                </SelectTrigger>
 +                <SelectContent>
 +                  {contextCompressionReasoningLevels.map((level) => (
 +                    <SelectItem key={level} value={level}>
@@ -1144,12 +918,14 @@ index 00000000..c55e7066
 +            }
 +          />
 +        )}
-+          </>
-+        ) : null}
 +        <SettingsRow
 +          controlLayout="wide"
 +          label={intl.formatMessage({ id: "settings.contextCompression.effective.label" })}
-+          control={<span className="min-w-0 break-words text-right text-ui-base text-foreground-subtle">{effectiveLabel}</span>}
++          control={
++            <span className="min-w-0 break-words text-right text-ui-base text-foreground-subtle">
++              {effectiveLabel}
++            </span>
++          }
 +        />
 +      </SettingsGroupCard>
 +    </section>
@@ -1173,45 +949,40 @@ index cbe776bd..f4d18f69 100644
      id: "promptEnhance",
      icon: Sparkles,
 diff --git a/packages/ui/test/settingsNavigation.test.ts b/packages/ui/test/settingsNavigation.test.ts
-index 87976ee5..df36ed08 100644
+index 87976ee5..086c4c00 100644
 --- a/packages/ui/test/settingsNavigation.test.ts
 +++ b/packages/ui/test/settingsNavigation.test.ts
 @@ -19,7 +19,7 @@ afterEach(() => {
  });
-
+ 
  describe("settingsNavigation", () => {
 -  it.each(["remoteDevices", "officialServices", "promptEnhance"] as const)(
 +  it.each(["remoteDevices", "officialServices", "promptEnhance", "contextCompression"] as const)(
      "%s 的导航意图和重启偏好不会被合法值校验丢弃",
      async (section) => {
        const local = new Map<string, string>();
-@@ -69,23 +69,19 @@ describe("settingsNavigation", () => {
-   });
-
-   it.each([{}, { isDesktop: true }, { isMacDesktop: true }, { isWindowsDesktop: true }])(
--    "提示词增强在 Web 和桌面基础设置中可见且不会被平台回退：%j",
-+    "上下文压缩在 Web 和桌面基础设置中紧跟模型设置且不会被平台回退：%j",
-     async (options) => {
-       const { createSettingsPageConfig, resolveSettingsSectionForPlatform } = await import(
-         "../src/settings/settingsPageConfig.js"
-       );
-       const { settingsSections, settingsSectionGroups } = createSettingsPageConfig(options);
-+      const basics = settingsSectionGroups.find((group) => group.id === "basics")?.sections ?? [];
-
--      expect(settingsSectionGroups.find((group) => group.id === "basics")?.sections).toEqual(
--        expect.arrayContaining([
--          expect.objectContaining({
--            id: "promptEnhance",
--            titleId: "settings.promptEnhance.title",
--          }),
--        ]),
-+      expect(basics.findIndex((section) => section.id === "contextCompression")).toBe(
-+        basics.findIndex((section) => section.id === "modelProvider") + 1,
-       );
--      expect(resolveSettingsSectionForPlatform("promptEnhance", settingsSections)).toBe(
--        "promptEnhance",
-+      expect(resolveSettingsSectionForPlatform("contextCompression", settingsSections)).toBe(
-+        "contextCompression",
-       );
+@@ -90,6 +90,24 @@ describe("settingsNavigation", () => {
      },
    );
+ 
++  it.each([{}, { isDesktop: true }, { isMacDesktop: true }, { isWindowsDesktop: true }])(
++    "上下文压缩在 Web 和桌面基础设置中紧跟模型设置且不会被平台回退：%j",
++    async (options) => {
++      const { createSettingsPageConfig, resolveSettingsSectionForPlatform } = await import(
++        "../src/settings/settingsPageConfig.js"
++      );
++      const { settingsSections, settingsSectionGroups } = createSettingsPageConfig(options);
++      const basics = settingsSectionGroups.find((group) => group.id === "basics")?.sections ?? [];
++
++      expect(basics.findIndex((section) => section.id === "contextCompression")).toBe(
++        basics.findIndex((section) => section.id === "modelProvider") + 1,
++      );
++      expect(resolveSettingsSectionForPlatform("contextCompression", settingsSections)).toBe(
++        "contextCompression",
++      );
++    },
++  );
++
+   it("在 test 环境保留 usage 分区", async () => {
+     const navigation = await loadSettingsNavigation("test");
+ 
