@@ -719,7 +719,7 @@ new file mode 100644
 index 00000000..e2083c2f
 --- /dev/null
 +++ b/packages/ui/src/settings/ContextCompressionSection.tsx
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,212 @@
 +import { useMemo, useState } from "react";
 +import {
 +  contextCompressionChannels,
@@ -894,44 +894,31 @@ index 00000000..e2083c2f
 +                </Select>
 +              }
 +            />
++            <SettingsRow
++              controlLayout="wide"
++              label={intl.formatMessage({ id: "settings.contextCompression.reasoning.label" })}
++              description={intl.formatMessage({ id: "settings.contextCompression.reasoning.note" })}
++              control={
++                <Select
++                  value={reasoningValue}
++                  disabled={disabled}
++                  onValueChange={(reasoningLevel) => void write({ reasoningLevel })}
++                >
++                  <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
++                    <SelectValue />
++                  </SelectTrigger>
++                  <SelectContent>
++                    {reasoningOptions.map((level) => (
++                      <SelectItem key={level} value={level}>
++                        {reasoningLabel(level)}
++                      </SelectItem>
++                    ))}
++                  </SelectContent>
++                </Select>
++              }
++            />
 +          </>
 +        ) : null}
-+        {current.channel === "auto" ? (
-+          <SettingsRow
-+            controlLayout="wide"
-+            label={intl.formatMessage({ id: "settings.contextCompression.reasoning.label" })}
-+            description={intl.formatMessage({ id: "settings.contextCompression.reasoning.note" })}
-+            control={
-+              <span className="text-ui-base text-foreground-subtle">
-+                {intl.formatMessage({ id: "settings.contextCompression.reasoning.followSession" })}
-+              </span>
-+            }
-+          />
-+        ) : (
-+          <SettingsRow
-+            controlLayout="wide"
-+            label={intl.formatMessage({ id: "settings.contextCompression.reasoning.label" })}
-+            description={intl.formatMessage({ id: "settings.contextCompression.reasoning.note" })}
-+            control={
-+              <Select
-+                value={reasoningValue}
-+                disabled={disabled}
-+                onValueChange={(reasoningLevel) => void write({ reasoningLevel })}
-+              >
-+                <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
-+                  <SelectValue />
-+                </SelectTrigger>
-+                <SelectContent>
-+                  {reasoningOptions.map((level) => (
-+                    <SelectItem key={level} value={level}>
-+                      {reasoningLabel(level)}
-+                    </SelectItem>
-+                  ))}
-+                </SelectContent>
-+              </Select>
-+            }
-+          />
-+        )}
 +        <SettingsRow
 +          controlLayout="wide"
 +          label={intl.formatMessage({ id: "settings.contextCompression.effective.label" })}
