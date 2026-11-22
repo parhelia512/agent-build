@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..ffe05d16
 --- /dev/null
 +++ b/packages/shared/src/prompt-enhance.ts
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,77 @@
 +import { z } from "zod";
 +
 +const nonEmptyString = z.string().trim().min(1);
@@ -21,15 +21,14 @@ index 00000000..ffe05d16
 + * `default` 表示「交给模型默认档」——解析时同样会下发一个具体档位（模型取值末位），
 + * 因为 selection 缺档位会被 Registry 直接拒；请求的档位不被模型支持时也回落到默认档。
 + */
-+export const promptEnhanceReasoningLevels = ["default", "low", "medium", "high"] as const;
-+export const promptEnhanceReasoningLevelSchema = z.enum(promptEnhanceReasoningLevels);
++export const promptEnhanceReasoningLevelSchema = z.string().trim().min(1);
 +
 +export const PROMPT_ENHANCE_CONTEXT_ROUNDS_MIN = 1;
 +export const PROMPT_ENHANCE_CONTEXT_ROUNDS_MAX = 10;
 +const PROMPT_ENHANCE_DEFAULT_CONTEXT_ROUNDS = 3;
 +
 +export type PromptEnhanceMode = (typeof promptEnhanceModes)[number];
-+export type PromptEnhanceReasoningLevel = (typeof promptEnhanceReasoningLevels)[number];
++export type PromptEnhanceReasoningLevel = z.infer<typeof promptEnhanceReasoningLevelSchema>;
 +
 +const promptEnhanceCustomSelectionSchema = z.object({
 +  providerId: nonEmptyString,
@@ -231,7 +230,7 @@ new file mode 100644
 index 00000000..90e267cf
 --- /dev/null
 +++ b/packages/ui/src/settings/PromptEnhanceSection.tsx
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,385 @@
 +/**
 + * 「提示词增强」设置分区。
 + *
@@ -249,7 +248,6 @@ index 00000000..90e267cf
 +  PROMPT_ENHANCE_SETTINGS_DEFAULTS,
 +  promptEnhanceChannels,
 +  promptEnhanceModes,
-+  promptEnhanceReasoningLevels,
 +  type PromptEnhanceSettings,
 +} from "@zcode/shared";
 +import { TID_SETTINGS_PROMPT_ENHANCE_ENABLED_SWITCH } from "@zcode/shared/test-ids";
@@ -261,6 +259,7 @@ index 00000000..90e267cf
 +  SelectTrigger,
 +  SelectValue,
 +} from "@/components/ui/select.js";
++import { thoughtLevelLabelId } from "@/chat-input-toolbar/thoughtLevelOptions.js";
 +import { Switch } from "@/components/ui/switch.js";
 +import { toast } from "@/components/ui/toast.js";
 +import { useModelSelectionView } from "@/hooks/useModelSelectionView.js";
@@ -309,6 +308,25 @@ index 00000000..90e267cf
 +  const customProvider = providers.find(
 +    (provider) => provider.providerId === current.customSelection?.providerId,
 +  );
++
++  // 推理强度选项来自所选模型自身声明的档位，不再使用固定列表；已存档位不在当前模型内时按默认显示。
++  const modelReasoningLevels =
++    customProvider?.models.find((model) => model.modelId === current.customSelection?.modelId)
++      ?.config.optionSpecs.reasoningLevel.values ?? [];
++  const reasoningOptions = [
++    "default",
++    ...modelReasoningLevels.filter((level) => level !== "default"),
++  ];
++  const reasoningValue = reasoningOptions.includes(current.reasoningLevel)
++    ? current.reasoningLevel
++    : "default";
++  const reasoningLabel = (level: string) => {
++    if (level === "default") {
++      return intl.formatMessage({ id: "settings.promptEnhance.reasoning.default" });
++    }
++    const labelId = thoughtLevelLabelId(level);
++    return labelId ? intl.formatMessage({ id: labelId }) : level;
++  };
 +
 +  // 当前生效通道只做展示。自动通道跟随的是每个输入框各自的草稿选型（可能互不相同），全局设置页
 +  // 给不出唯一模型，因此只说明它跟随什么；独立通道是全局唯一的设置，照常显示 provider / 模型。
@@ -525,19 +543,19 @@ index 00000000..90e267cf
 +              description={intl.formatMessage({ id: "settings.promptEnhance.reasoning.note" })}
 +              control={
 +                <Select
-+                  value={current.reasoningLevel}
++                  value={reasoningValue}
 +                  disabled={disabled}
 +                  onValueChange={(level) =>
-+                    void write({ reasoningLevel: level as PromptEnhanceSettings["reasoningLevel"] })
++                    void write({ reasoningLevel: level })
 +                  }
 +                >
 +                  <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
 +                    <SelectValue />
 +                  </SelectTrigger>
 +                  <SelectContent>
-+                    {promptEnhanceReasoningLevels.map((level) => (
++                    {reasoningOptions.map((level) => (
 +                      <SelectItem key={level} value={level}>
-+                        {intl.formatMessage({ id: `settings.promptEnhance.reasoning.${level}` })}
++                        {reasoningLabel(level)}
 +                      </SelectItem>
 +                    ))}
 +                  </SelectContent>

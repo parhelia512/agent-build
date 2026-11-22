@@ -387,15 +387,14 @@ new file mode 100644
 index 00000000..5aa2710e
 --- /dev/null
 +++ b/packages/shared/src/context-compression.ts
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,53 @@
 +import { z } from "zod";
 +
 +const nonEmptyString = z.string().trim().min(1);
 +
 +export const contextCompressionChannels = ["auto", "custom"] as const;
 +export const contextCompressionChannelSchema = z.enum(contextCompressionChannels);
-+export const contextCompressionReasoningLevels = ["default", "low", "medium", "high"] as const;
-+export const contextCompressionReasoningLevelSchema = z.enum(contextCompressionReasoningLevels);
++export const contextCompressionReasoningLevelSchema = z.string().trim().min(1);
 +
 +const contextCompressionCustomSelectionSchema = z
 +  .object({
@@ -720,11 +719,10 @@ new file mode 100644
 index 00000000..e2083c2f
 --- /dev/null
 +++ b/packages/ui/src/settings/ContextCompressionSection.tsx
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,225 @@
 +import { useMemo, useState } from "react";
 +import {
 +  contextCompressionChannels,
-+  contextCompressionReasoningLevels,
 +  mergeContextCompressionSettingsPatch,
 +  resolveContextCompressionSettings,
 +  type ContextCompressionSettings,
@@ -736,6 +734,7 @@ index 00000000..e2083c2f
 +  SelectTrigger,
 +  SelectValue,
 +} from "@/components/ui/select.js";
++import { thoughtLevelLabelId } from "@/chat-input-toolbar/thoughtLevelOptions.js";
 +import { toast } from "@/components/ui/toast.js";
 +import { useModelSelectionView } from "@/hooks/useModelSelectionView.js";
 +import { useSettings } from "@/hooks/useSettingService.js";
@@ -775,6 +774,25 @@ index 00000000..e2083c2f
 +  const customProvider = providers.find(
 +    (provider) => provider.providerId === current.customSelection?.providerId,
 +  );
++
++  // 推理强度选项来自所选模型自身声明的档位，不再使用固定列表；已存档位不在当前模型内时按默认显示。
++  const modelReasoningLevels =
++    customProvider?.models.find((model) => model.modelId === current.customSelection?.modelId)
++      ?.config.optionSpecs.reasoningLevel.values ?? [];
++  const reasoningOptions = [
++    "default",
++    ...modelReasoningLevels.filter((level) => level !== "default"),
++  ];
++  const reasoningValue = reasoningOptions.includes(current.reasoningLevel)
++    ? current.reasoningLevel
++    : "default";
++  const reasoningLabel = (level: string) => {
++    if (level === "default") {
++      return intl.formatMessage({ id: "settings.contextCompression.reasoning.default" });
++    }
++    const labelId = thoughtLevelLabelId(level);
++    return labelId ? intl.formatMessage({ id: labelId }) : level;
++  };
 +  const effectiveLabel =
 +    current.channel === "auto"
 +      ? intl.formatMessage({ id: "settings.contextCompression.effective.followSelection" })
@@ -896,21 +914,17 @@ index 00000000..e2083c2f
 +            description={intl.formatMessage({ id: "settings.contextCompression.reasoning.note" })}
 +            control={
 +              <Select
-+                value={current.reasoningLevel}
++                value={reasoningValue}
 +                disabled={disabled}
-+                onValueChange={(reasoningLevel) =>
-+                  void write({
-+                    reasoningLevel: reasoningLevel as ContextCompressionSettings["reasoningLevel"],
-+                  })
-+                }
++                onValueChange={(reasoningLevel) => void write({ reasoningLevel })}
 +              >
 +                <SelectTrigger size="lg" className="w-full min-w-0 sm:w-64">
 +                  <SelectValue />
 +                </SelectTrigger>
 +                <SelectContent>
-+                  {contextCompressionReasoningLevels.map((level) => (
++                  {reasoningOptions.map((level) => (
 +                    <SelectItem key={level} value={level}>
-+                      {intl.formatMessage({ id: `settings.contextCompression.reasoning.${level}` })}
++                      {reasoningLabel(level)}
 +                    </SelectItem>
 +                  ))}
 +                </SelectContent>
