@@ -1,0 +1,161 @@
+diff --git a/packages/desktop/test/e2e/settings/settings-ui-polish.test.ts b/packages/desktop/test/e2e/settings/settings-ui-polish.test.ts
+index 715b6dae..db98278c 100644
+--- a/packages/desktop/test/e2e/settings/settings-ui-polish.test.ts
++++ b/packages/desktop/test/e2e/settings/settings-ui-polish.test.ts
+@@ -989,6 +989,19 @@ describe("设置页 UI polish E2E", () => {
+     // Todo98 保留用户 Map 原文，不再压成单行或删除表达式中的空格。
+     await reasoningMapEditor.setValue(personalReasoningMapInput);
+ 
++    const fullPreset = $('[data-reasoning-preset="full"]');
++    const effortPreset = $('[data-reasoning-preset="intensity"]');
++    await fullPreset.waitForDisplayed();
++    await expect(effortPreset).toHaveAttribute("aria-pressed", "true");
++    await fullPreset.click();
++    await expect(fullPreset).toHaveAttribute("aria-pressed", "true");
++    await expect(effortPreset).toHaveAttribute("aria-pressed", "false");
++    expect(await readReasoningLevelValues()).toEqual(["low", "medium", "high", "xhigh", "max"]);
++    expect(await reasoningMapEditor.getValue()).toBe(personalReasoningMapInput);
++    await effortPreset.click();
++    await expect(effortPreset).toHaveAttribute("aria-pressed", "true");
++    expect(await readReasoningLevelValues()).toEqual(["low", "high", "max"]);
++
+     await browser.execute(() => {
+       const first = document.querySelector<HTMLButtonElement>(
+         '[data-model-reasoning-level-editor="true"] > div > button:first-of-type',
+@@ -1031,6 +1044,7 @@ describe("设置页 UI polish E2E", () => {
+       outerHighlighted: false,
+       capabilityCheckboxes: 1,
+     });
++    await expect(effortPreset).toHaveAttribute("aria-pressed", "false");
+     await clickVisibleButton(/保存|Save/);
+     // 修复原因：Dialog 有关闭动画。若立即用 DOM click 重开，会穿透尚未卸载的遮罩层，
+     // wait 条件又会误把旧 Dialog 当成新 Dialog，随后只能持续读到空档位。
+@@ -1086,6 +1100,11 @@ describe("设置页 UI polish E2E", () => {
+         timeoutMsg: "推理档位顺序保存后没有保持",
+       },
+     );
++    await expect(effortPreset).toHaveAttribute("aria-pressed", "false");
++    await fullPreset.click();
++    await closeAndReopenModelEditor("save");
++    await expect(fullPreset).toHaveAttribute("aria-pressed", "true");
++    expect(await readReasoningLevelValues()).toEqual(["low", "medium", "high", "xhigh", "max"]);
+     expect(await $('[data-model-reasoning-level-map-editor="true"] textarea').getValue()).toBe(
+       personalReasoningMapInput,
+     );
+diff --git a/packages/ui/src/i18n/locales/en-US.ts b/packages/ui/src/i18n/locales/en-US.ts
+index 9ba0b39e..12fdcaaf 100644
+--- a/packages/ui/src/i18n/locales/en-US.ts
++++ b/packages/ui/src/i18n/locales/en-US.ts
+@@ -4040,6 +4040,11 @@ const enUS: Record<string, string> = {
+   "settings.modelProvider.reasoningLevelOptionSpecJson": "Reasoning level option spec JSON",
+   "settings.modelProvider.reasoningLevelsOrdered": "Reasoning levels (low to high)",
+   "settings.modelProvider.reasoningLevelAdd": "Add reasoning level",
++  "settings.modelProvider.reasoningLevelPreset.switch": "On/Off",
++  "settings.modelProvider.reasoningLevelPreset.three": "Three levels",
++  "settings.modelProvider.reasoningLevelPreset.intensity": "Effort",
++  "settings.modelProvider.reasoningLevelPreset.full": "Full range",
++  "settings.modelProvider.reasoningLevelPresetGroup": "Common sets",
+   "settings.modelProvider.reasoningLevelMapping": "Reasoning parameter mapping",
+   "settings.modelProvider.reasoningLevelDelete": "Delete reasoning level",
+   "settings.modelProvider.modelMetadata.invalid.reasoningLevelValues":
+diff --git a/packages/ui/src/i18n/locales/fa.ts b/packages/ui/src/i18n/locales/fa.ts
+index a84fab18..c5191ce2 100644
+--- a/packages/ui/src/i18n/locales/fa.ts
++++ b/packages/ui/src/i18n/locales/fa.ts
+@@ -3030,6 +3030,11 @@ const faIR: Record<string, string> = {
+   "settings.modelProvider.reasoningLevelOptionSpecJson": "مشخصات گزینه‌های سطح تفکر (JSON)",
+   "settings.modelProvider.reasoningLevelsOrdered": "سطوح تفکر (از کم به زیاد)",
+   "settings.modelProvider.reasoningLevelAdd": "افزودن سطح تفکر",
++  "settings.modelProvider.reasoningLevelPreset.switch": "روشن/خاموش",
++  "settings.modelProvider.reasoningLevelPreset.three": "سه سطح",
++  "settings.modelProvider.reasoningLevelPreset.intensity": "شدت",
++  "settings.modelProvider.reasoningLevelPreset.full": "محدودهٔ کامل",
++  "settings.modelProvider.reasoningLevelPresetGroup": "ترکیب‌های رایج",
+   "settings.modelProvider.reasoningLevelMapping": "نگاشت پارامتر تفکر",
+   "settings.modelProvider.reasoningLevelDelete": "حذف سطح تفکر",
+   "settings.modelProvider.modelMetadata.invalid.reasoningLevelValues":
+diff --git a/packages/ui/src/i18n/locales/zh-CN.ts b/packages/ui/src/i18n/locales/zh-CN.ts
+index e298e7d7..eba4ede2 100644
+--- a/packages/ui/src/i18n/locales/zh-CN.ts
++++ b/packages/ui/src/i18n/locales/zh-CN.ts
+@@ -3790,6 +3790,11 @@ const zhCN: Record<string, string> = {
+   "settings.modelProvider.reasoningLevelOptionSpecJson": "推理档位 Option Spec JSON",
+   "settings.modelProvider.reasoningLevelsOrdered": "推理等级（从低到高）",
+   "settings.modelProvider.reasoningLevelAdd": "添加推理等级",
++  "settings.modelProvider.reasoningLevelPreset.switch": "开关",
++  "settings.modelProvider.reasoningLevelPreset.three": "三档",
++  "settings.modelProvider.reasoningLevelPreset.intensity": "强度",
++  "settings.modelProvider.reasoningLevelPreset.full": "完整",
++  "settings.modelProvider.reasoningLevelPresetGroup": "常用组合",
+   "settings.modelProvider.reasoningLevelMapping": "推理参数映射",
+   "settings.modelProvider.reasoningLevelDelete": "删除推理等级",
+   "settings.modelProvider.modelMetadata.invalid.reasoningLevelValues": "推理档位不能为空或重复",
+diff --git a/packages/ui/src/settings/model-provider-section/ProviderModelReasoningLevelEditor.tsx b/packages/ui/src/settings/model-provider-section/ProviderModelReasoningLevelEditor.tsx
+index e0f45340..04b89127 100644
+--- a/packages/ui/src/settings/model-provider-section/ProviderModelReasoningLevelEditor.tsx
++++ b/packages/ui/src/settings/model-provider-section/ProviderModelReasoningLevelEditor.tsx
+@@ -2,9 +2,17 @@ import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from
+ import { PlusIcon, XIcon } from "lucide-react";
+ import { Button } from "@/components/ui/button.js";
+ import { cn } from "@/components/lib/utils.js";
++import { useZCodeIntl } from "@/i18n/IntlProvider.js";
+ import { TECHNICAL_INPUT_ATTRIBUTES } from "@/lib/technicalInputAttributes.js";
+ import { modelEditorControlStyle } from "@/settings/model-provider-section/modelEditorControlStyle.js";
+ 
++const REASONING_LEVEL_PRESETS = [
++  { id: "switch", values: ["disabled", "enabled"] },
++  { id: "three", values: ["low", "medium", "high"] },
++  { id: "intensity", values: ["low", "high", "max"] },
++  { id: "full", values: ["low", "medium", "high", "xhigh", "max"] },
++] as const;
++
+ export function ProviderModelReasoningLevelEditor({
+   values,
+   overridden,
+@@ -18,6 +26,7 @@ export function ProviderModelReasoningLevelEditor({
+   deleteLabel: string;
+   onChange: (values: readonly string[]) => void;
+ }) {
++  const { intl } = useZCodeIntl();
+   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+   const [editingValue, setEditingValue] = useState("");
+   const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
+@@ -186,6 +195,38 @@ export function ProviderModelReasoningLevelEditor({
+           <span className="sr-only">{addLabel}</span>
+         </Button>
+       )}
++      <div className="basis-full">
++        <div
++          className="flex flex-wrap gap-1.5"
++          role="group"
++          aria-label={intl.formatMessage({ id: "settings.modelProvider.reasoningLevelPresetGroup" })}
++        >
++          {REASONING_LEVEL_PRESETS.map((preset) => {
++            const selected =
++              preset.values.length === values.length &&
++              preset.values.every((value, index) => value === values[index]);
++            return (
++              <Button
++                key={preset.id}
++                type="button"
++                variant="outline"
++                size="sm"
++                aria-pressed={selected}
++                data-reasoning-preset={preset.id}
++                className={modelEditorControlStyle(false, selected)}
++                onClick={() => {
++                  cancelEdit();
++                  if (!selected) onChange(preset.values);
++                }}
++              >
++                {intl.formatMessage({
++                  id: `settings.modelProvider.reasoningLevelPreset.${preset.id}`,
++                })}
++              </Button>
++            );
++          })}
++        </div>
++      </div>
+     </div>
+   );
+ }
