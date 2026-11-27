@@ -11,7 +11,7 @@ index 32e13499..dd94cd92 100644
    };
  
 diff --git a/apps/zcode-cli/packages/bootstrap/src/app/types.ts b/apps/zcode-cli/packages/bootstrap/src/app/types.ts
-index 06c0d2aa..a2c4c9c6 100644
+index 6e774115..bfee0cb0 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/app/types.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/app/types.ts
 @@ -237,6 +237,8 @@ export interface SubmitPromptOptionsBase {
@@ -24,14 +24,22 @@ index 06c0d2aa..a2c4c9c6 100644
  
  export type SubmitPromptOptions = SubmitPromptOptionsBase &
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
-index 5724973e..a2236fed 100644
+index 5724973e..023c70d2 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/handlers/goal-compact.ts
-@@ -135,17 +135,32 @@ export async function startManualCompact(
+@@ -12,6 +12,7 @@ import type {
+   CommandPayloadMap,
+   CommandResult,
+ } from "@zcode/shared/zcode-protocol-v4";
++import { resolveContextCompressionModelSelection } from "@zcode/shared";
+ import type { SteerTurnOptions, SubmitPromptOptions } from "../../../app/types.js";
+ import { runWithSessionResidencyFinalization } from "../../../session-execution/index.js";
+ import { inputIntentMetadata } from "../input-intent.js";
+@@ -135,11 +136,13 @@ export async function startManualCompact(
    // record.activeAbortController 中断。不登记 controller，压缩中的请求会跑到自然结束。
    record.activeAbortController = abortController;
    manualCompactControllers.add(abortController);
-+  const compactModelSelection = resolveConfiguredCompactModelSelection(host);
++  const compactModelSelection = resolveContextCompressionModelSelection(host.contextCompression);
    void runWithSessionResidencyFinalization(record, () =>
      runCompactTurnInBackground(host, record, {
        abortController,
@@ -41,26 +49,7 @@ index 5724973e..a2236fed 100644
      }),
    ).catch(() => {
      // 后台 compact 的错误经事件流（CompactStarted/终态 marker）降级上报；兜底防 unhandled rejection。
-   });
- }
- 
-+function resolveConfiguredCompactModelSelection(
-+  host: V4CommandCoreHost,
-+): import("@zcode/shared").ModelSelection | undefined {
-+  const settings = host.contextCompression;
-+  if (settings?.channel !== "custom" || !settings.customSelection) return undefined;
-+  const { customSelection, reasoningLevel } = settings;
-+  return {
-+    ...customSelection,
-+    // 推理强度由压缩模型决定，会话模型支持的强度不能用于过滤独立模型的配置。
-+    ...(reasoningLevel === "default" ? {} : { options: { reasoningLevel } }),
-+  };
-+}
-+
- async function runCompactTurnInBackground(
-   host: V4CommandCoreHost,
-   record: V4SessionRecordView,
-@@ -153,6 +168,7 @@ async function runCompactTurnInBackground(
+@@ -153,6 +156,7 @@ async function runCompactTurnInBackground(
      abortController: AbortController;
      foregroundPromotionLeaseId?: string;
      inputId: string;
@@ -68,7 +57,7 @@ index 5724973e..a2236fed 100644
    },
  ): Promise<void> {
    const startedAt = Date.now();
-@@ -167,6 +183,9 @@ async function runCompactTurnInBackground(
+@@ -167,6 +171,9 @@ async function runCompactTurnInBackground(
      await record.app.submitPrompt("/compact", {
        abortSignal: params.abortController.signal,
        inputId: params.inputId,
@@ -79,7 +68,7 @@ index 5724973e..a2236fed 100644
    } catch (error) {
      lifecycleStatus = params.abortController.signal.aborted ? "cancelled" : "failed";
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
-index 514ffb34..e9570bfa 100644
+index 03635183..59adcf6b 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/commands/types.ts
 @@ -12,7 +12,11 @@ import type {
@@ -104,18 +93,55 @@ index 514ffb34..e9570bfa 100644
    getRecord(sessionId: string): V4SessionRecordView | undefined;
    logger?: V4CommandLogger;
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
-index 1c047705..837cf02a 100644
+index 1c047705..ce5c7dca 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/model-io-preferences.ts
-@@ -12,7 +12,7 @@ export async function updateModelIoPreferences(
+@@ -1,4 +1,7 @@
+-import { zcodeWorkspaceUpdateModelIoPreferencesParamsSchema } from "@zcode/shared";
++import {
++  resolveContextCompressionModelSelection,
++  zcodeWorkspaceUpdateModelIoPreferencesParamsSchema,
++} from "@zcode/shared";
+ import { parseParams, type ZCodeProtocolAgentServerContext } from "./server-types.js";
+ 
+ /**
+@@ -12,9 +15,13 @@ export async function updateModelIoPreferences(
    const params = parseParams(zcodeWorkspaceUpdateModelIoPreferencesParamsSchema, rawParams);
    const enabled = params.preferences.fullRetentionEnabled;
    context.appRuntimePreferences.modelIoFullRetentionEnabled = enabled;
 -
 +  context.appRuntimePreferences.contextCompression = params.preferences.contextCompression ?? undefined;
    let updatedSessionCount = 0;
++  const compactModelSelection = resolveContextCompressionModelSelection(
++    context.appRuntimePreferences.contextCompression,
++  );
    for (const record of context.sessions.values()) {
++    record.app.runtime?.setCompactModelSelection?.(compactModelSelection);
      if (!record.app.setModelIoFullRetentionEnabled) continue;
+     record.app.setModelIoFullRetentionEnabled(enabled);
+     updatedSessionCount += 1;
+diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
+index 22421eff..e23fc954 100644
+--- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
++++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-operations.ts
+@@ -2,6 +2,7 @@ import {
+   isAuxiliarySessionKind,
+   isReadonlyAgentSessionKind,
+   OFF_PEAK_EXECUTION_TOOL_DENYLIST,
++  resolveContextCompressionModelSelection,
+ } from "@zcode/shared";
+ /* eslint-disable max-lines -- ZCode Protocol 的 session/workspace 方法共享同一个 server context 与 snapshot helpers，迁移期先集中维护。 */
+ import { observeSessionDebug } from "./session-debug.js";
+@@ -3566,6 +3567,9 @@ async function createRecord(
+     version: context.deps.version,
+     modelIoFullRetentionEnabled: context.appRuntimePreferences.modelIoFullRetentionEnabled,
+   });
++  app.runtime?.setCompactModelSelection?.(
++    resolveContextCompressionModelSelection(context.appRuntimePreferences.contextCompression),
++  );
+   const now = Date.now();
+   const record: ZCodeProtocolSessionRecord = {
+     app,
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
 index 7f6c5430..a705f665 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server-types.ts
@@ -129,7 +155,7 @@ index 7f6c5430..a705f665 100644
      offPeakToolEnabled: boolean;
      /**
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
-index af7bbc7f..7f8b8172 100644
+index d7aec31f..6926d13a 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/server.ts
 @@ -298,6 +298,7 @@ export class ZCodeProtocolAgentServer {
@@ -141,7 +167,7 @@ index af7bbc7f..7f8b8172 100644
          // 动态工作流灰度门 fail-closed：Host 必须显式 workspace/updateDynamicWorkflowPolicy
          // 才开启。
 diff --git a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
-index e40409a7..9080f165 100644
+index d047e845..33cad523 100644
 --- a/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
 +++ b/apps/zcode-cli/packages/bootstrap/src/zcode-protocol/v4-bridge.ts
 @@ -780,6 +780,9 @@ export function createConversationV4Gateway(
@@ -190,11 +216,300 @@ index 3986ba16..fc32d49a 100644
    it("正路径：后台 submitPrompt('/compact') + 上锁 + ready 边界释放", async () => {
      let finishCompact!: () => void;
      const compactGate = new Promise<Record<string, never>>((resolve) => {
+diff --git a/apps/zcode-cli/packages/core/src/runtime/agent-runtime.ts b/apps/zcode-cli/packages/core/src/runtime/agent-runtime.ts
+index 862b5720..310ab21f 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/agent-runtime.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/agent-runtime.ts
+@@ -179,6 +179,7 @@ export class AgentRuntime {
+   /** 模型请求准入端口；随每次模型请求进调用上下文。 */
+   private modelRequestAdmission?: AgentRuntimeDeps["modelRequestAdmission"];
+   private sessionModelSelection: ModelSelection | undefined;
++  private compactModelSelection: ModelSelection | undefined;
+   private messageHistory: MessageHistory;
+   private readFileState: ReadFileStateMap;
+   private cachedTools: ModelToolContract[] | null = null;
+@@ -416,6 +417,8 @@ export interface AgentRuntime {
+   ): Promise<void>;
+   getSessionModelSelection(): ModelSelection | undefined;
+   setSessionModelSelection(selection: ModelSelection | undefined): void;
++  /** 上下文压缩使用的独立模型；undefined 表示沿用会话模型。 */
++  setCompactModelSelection(selection: ModelSelection | undefined): void;
+   getProjectId(): ProjectId;
+   ensureSessionPersistedForExternalActivity(
+     input: string,
+diff --git a/apps/zcode-cli/packages/core/src/runtime/internal-methods.ts b/apps/zcode-cli/packages/core/src/runtime/internal-methods.ts
+index a3f20b72..87b683e6 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/internal-methods.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/internal-methods.ts
+@@ -81,6 +81,7 @@ export interface AgentRuntimeCoreMethods {
+   ): Promise<void>;
+   getSessionModelSelection(): ModelSelection | undefined;
+   setSessionModelSelection(selection: ModelSelection | undefined): void;
++  setCompactModelSelection(selection: ModelSelection | undefined): void;
+   getProjectId(): ProjectId;
+   setWorkingDirectory(cwd: string): void;
+   ensureSessionPersistedForExternalActivity(
+diff --git a/apps/zcode-cli/packages/core/src/runtime/internal.ts b/apps/zcode-cli/packages/core/src/runtime/internal.ts
+index 1ea63fc4..bd526e78 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/internal.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/internal.ts
+@@ -88,6 +88,7 @@ export interface AgentRuntimeInternal
+   browserControlPort?: AgentRuntimeDeps["browserControlPort"];
+   modelRequestAdmission?: AgentRuntimeDeps["modelRequestAdmission"];
+   sessionModelSelection: ModelSelection | undefined;
++  compactModelSelection: ModelSelection | undefined;
+   messageHistory: MessageHistory;
+   readFileState: ReadFileStateMap;
+   cachedTools: ModelToolContract[] | null;
+diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/compact-model.ts b/apps/zcode-cli/packages/core/src/runtime/methods/compact-model.ts
+new file mode 100644
+index 00000000..6b2cc049
+--- /dev/null
++++ b/apps/zcode-cli/packages/core/src/runtime/methods/compact-model.ts
+@@ -0,0 +1,88 @@
++import { getAutoCompactThreshold } from "../deps.js";
++import type { AutoCompactPolicyConfig, Model, ModelSelection } from "../deps.js";
++import type { AgentRuntimeInternal } from "../internal.js";
++import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
++import { createTurnModel } from "./turn-model.js";
++
++// 自动压缩每个 model step 都会解析一次；同一失效选择只告警一次，避免刷屏。
++const warnedUnavailableSelections = new WeakMap<AgentRuntimeInternal, string>();
++
++/**
++ * 创建独立压缩模型；未配置或不可用时返回 undefined，由调用方沿用会话模型。
++ * 未指定或当前模型不支持的推理强度按模型默认档位补齐，否则 Registry 校验会拒绝整个选择。
++ */
++export function resolveCompactModel(
++  runtime: AgentRuntimeInternal,
++  selection: ModelSelection | undefined = runtime.compactModelSelection,
++): Model | undefined {
++  if (!selection) return undefined;
++  try {
++    return createTurnModel(runtime, {
++      selection: completeCompactReasoningLevel(runtime, selection),
++    });
++  } catch (error) {
++    const reasoningLevel = selection.options?.reasoningLevel ?? "";
++    const key = `${selection.providerId}/${selection.modelId}/${reasoningLevel}`;
++    if (warnedUnavailableSelections.get(runtime) === key) return undefined;
++    warnedUnavailableSelections.set(runtime, key);
++    runtime.logger?.warn("Context compression model unavailable; using session model", {
++      error: error instanceof Error ? error.message : String(error),
++      modelId: selection.modelId,
++      providerId: selection.providerId,
++      sessionId: runtime.sessionId,
++    });
++    return undefined;
++  }
++}
++
++function completeCompactReasoningLevel(
++  runtime: AgentRuntimeInternal,
++  selection: ModelSelection,
++): ModelSelection {
++  const entry = runtime.modelCatalogPort
++    ?.listModels()
++    .find(
++      (candidate) =>
++        candidate.providerId === selection.providerId && candidate.modelId === selection.modelId,
++    );
++  if (!entry?.defaultReasoningLevel) return selection;
++  const reasoningLevel = selection.options?.reasoningLevel;
++  if (reasoningLevel !== undefined && entry.reasoningLevels.includes(reasoningLevel)) {
++    return selection;
++  }
++  return {
++    ...selection,
++    options: { ...selection.options, reasoningLevel: entry.defaultReasoningLevel },
++  };
++}
++
++/**
++ * 自动压缩触发时整段上下文要发给压缩模型，阈值必须同时落在会话模型和压缩模型的窗口内，
++ * 否则压缩模型窗口更小时，压缩请求本身就会超窗。
++ */
++export function buildAutoCompactPolicyConfig(
++  runtime: AgentRuntimeInternal,
++  sessionModel: Model,
++  compactModel: Model | undefined,
++): AutoCompactPolicyConfig {
++  const sessionConfig = policyConfigForModel(runtime, sessionModel);
++  if (!compactModel || compactModel === sessionModel) return sessionConfig;
++  const compactConfig = policyConfigForModel(runtime, compactModel);
++  return getAutoCompactThreshold(compactConfig) < getAutoCompactThreshold(sessionConfig)
++    ? compactConfig
++    : sessionConfig;
++}
++
++function policyConfigForModel(
++  runtime: AgentRuntimeInternal,
++  model: Model,
++): AutoCompactPolicyConfig {
++  return {
++    contextWindow: model.properties.contextWindow,
++    ...runtime.config.compact,
++    maxOutputTokens: resolveNormalRequestMaxOutputTokens({
++      modelMaxOutputTokens: model.optionSpecs.maxOutputTokens.max,
++    }),
++    modelContextBudgetStrategy: runtime.config.modelContextBudgetStrategy,
++  };
++}
+diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/compact.ts b/apps/zcode-cli/packages/core/src/runtime/methods/compact.ts
+index 9af3a5fd..67a54974 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/methods/compact.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/methods/compact.ts
+@@ -13,7 +13,6 @@ import {
+   shouldAutoCompact,
+ } from "../deps.js";
+ import type {
+-  AutoCompactPolicyConfig,
+   AutoCompactTokenOverride,
+   SessionEvent,
+   TraceContext,
+@@ -32,7 +31,7 @@ import type { Model } from "../deps.js";
+ import type { ProviderContextUsageSnapshot } from "../types.js";
+ import type { AgentRuntimeInternal } from "../internal.js";
+ import { autoCompactDecisionLogContext } from "./compact-log-context.js";
+-import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
++import { buildAutoCompactPolicyConfig, resolveCompactModel } from "./compact-model.js";
+ import type {
+   AutoCompactLoopContext,
+   AutoCompactOutcome,
+@@ -190,14 +189,8 @@ export async function autoCompactIfNeeded(
+ ): Promise<AutoCompactOutcome> {
+   throwIfTurnAborted(abortSignal);
+ 
+-  const config: AutoCompactPolicyConfig = {
+-    contextWindow: context.model.properties.contextWindow,
+-    ...this.config.compact,
+-    maxOutputTokens: resolveNormalRequestMaxOutputTokens({
+-      modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
+-    }),
+-    modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
+-  };
++  const compactModel = resolveCompactModel(this);
++  const config = buildAutoCompactPolicyConfig(this, context.model, compactModel);
+   const activeEntries = context.turnRequestState.entries;
+   const activeProjection = buildRuntimeProviderRequestMessages(this, {
+     entries: activeEntries,
+@@ -276,7 +269,7 @@ export async function autoCompactIfNeeded(
+         agentListingTools,
+         activeEntries,
+         getContinuationTools: context.getContinuationTools,
+-        ...(context.model ? { model: context.model } : {}),
++        model: compactModel ?? context.model,
+       },
+     );
+     if (compactResult.outcome === "skipped") {
+@@ -398,7 +391,8 @@ export async function reactiveCompactAfterContextExceeded(
+   }
+ 
+   const tokenOverride = buildProviderUsageTokenOverride(activeMessages, sourceEntries);
+-  const contextWindow = context.model.properties.contextWindow;
++  const compactModel = resolveCompactModel(this);
++  const { contextWindow } = buildAutoCompactPolicyConfig(this, context.model, compactModel);
+ 
+   this.logger?.warn("Reactive compact started after model context overflow", {
+     ...traceContextToLogContext(turnTraceContext),
+@@ -433,7 +427,7 @@ export async function reactiveCompactAfterContextExceeded(
+         agentListingTools: context.agentListingTools,
+         activeEntries,
+         getContinuationTools: context.getContinuationTools,
+-        model: context.model,
++        model: compactModel ?? context.model,
+       },
+     );
+     if (compactResult.outcome === "skipped") {
+diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/config.ts b/apps/zcode-cli/packages/core/src/runtime/methods/config.ts
+index adc936f9..e5991906 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/methods/config.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/methods/config.ts
+@@ -105,6 +105,13 @@ export function setSessionModelSelection(
+   this.sessionModelSelection = selection && cloneModelSelection(selection);
+ }
+ 
++export function setCompactModelSelection(
++  this: AgentRuntimeInternal,
++  selection: ModelSelection | undefined,
++): void {
++  this.compactModelSelection = selection && cloneModelSelection(selection);
++}
++
+ export function getProjectId(this: AgentRuntimeInternal): ProjectId {
+   // Bash cd 会改变执行 cwd，但 project identity 不能随工具内 cwd 漂移。
+   return projectIdFromDirectory(this.workspaceRoot);
+diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/index.ts b/apps/zcode-cli/packages/core/src/runtime/methods/index.ts
+index b4509560..3a82f056 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/methods/index.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/methods/index.ts
+@@ -7,7 +7,11 @@ import {
+   setExecutionState,
+ } from "./config.js";
+ import { getMode, getPlanEnabled } from "./config.js";
+-import { getSessionModelSelection, setSessionModelSelection } from "./config.js";
++import {
++  getSessionModelSelection,
++  setCompactModelSelection,
++  setSessionModelSelection,
++} from "./config.js";
+ import { getProjectId } from "./config.js";
+ import { setWorkingDirectory } from "./config.js";
+ import { ensureSessionPersistedForExternalActivity } from "./config.js";
+@@ -209,6 +213,7 @@ export function installAgentRuntimeMethods(ctor: AgentRuntimeConstructor): void
+   proto.getPlanEnabled = getPlanEnabled;
+   proto.getSessionModelSelection = getSessionModelSelection;
+   proto.setSessionModelSelection = setSessionModelSelection;
++  proto.setCompactModelSelection = setCompactModelSelection;
+   proto.getProjectId = getProjectId;
+   proto.setWorkingDirectory = setWorkingDirectory;
+   proto.ensureSessionPersistedForExternalActivity = ensureSessionPersistedForExternalActivity;
+diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/microcompact.ts b/apps/zcode-cli/packages/core/src/runtime/methods/microcompact.ts
+index fe09b119..2de26900 100644
+--- a/apps/zcode-cli/packages/core/src/runtime/methods/microcompact.ts
++++ b/apps/zcode-cli/packages/core/src/runtime/methods/microcompact.ts
+@@ -14,7 +14,7 @@ import type {
+ } from "../deps.js";
+ import { maybeLocalMicrocompactRuntimeEntries, throwIfTurnAborted } from "../helpers/index.js";
+ import type { AgentRuntimeInternal } from "../internal.js";
+-import { resolveNormalRequestMaxOutputTokens } from "./model-token-limits.js";
++import { buildAutoCompactPolicyConfig, resolveCompactModel } from "./compact-model.js";
+ import type { TurnRequestState } from "./turn-loop-state.js";
+ import {
+   filterOutputTokenContinuationEntries,
+@@ -36,14 +36,11 @@ export async function microcompactIfNeeded(
+   if (this.config.compact?.enabled === false) return;
+   throwIfTurnAborted(abortSignal);
+ 
+-  const autoConfig: AutoCompactPolicyConfig = {
+-    contextWindow: context.model.properties.contextWindow,
+-    ...this.config.compact,
+-    maxOutputTokens: resolveNormalRequestMaxOutputTokens({
+-      modelMaxOutputTokens: context.model.optionSpecs.maxOutputTokens.max,
+-    }),
+-    modelContextBudgetStrategy: this.config.modelContextBudgetStrategy,
+-  };
++  const autoConfig = buildAutoCompactPolicyConfig(
++    this,
++    context.model,
++    this.config.compact?.microcompact?.enabled === true ? resolveCompactModel(this) : undefined,
++  );
+   const microcompactConfig = resolveLocalMicrocompactConfig(autoConfig);
+   const useMidConversationSystem =
+     this.config.midConversationSystem?.mode === "force" ||
 diff --git a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
-index 22a30b77..6aadb193 100644
+index 22a30b77..e81bd998 100644
 --- a/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
 +++ b/apps/zcode-cli/packages/core/src/runtime/methods/turn.ts
-@@ -412,13 +412,27 @@ export async function executeTurnCommand(
+@@ -80,6 +80,7 @@ import {
+   resolveExecutionModelRetryBudget,
+ } from "./turn-model.js";
+ import { rebuildContextPrefix } from "./context-refresh.js";
++import { resolveCompactModel } from "./compact-model.js";
+ import {
+   matchExecutionSelectionCreationFallback,
+   resolveExecutionFallbackCandidates,
+@@ -412,13 +413,17 @@ export async function executeTurnCommand(
        }
  
        if (compactInstructions !== null) {
@@ -205,27 +520,17 @@ index 22a30b77..6aadb193 100644
 -          options?.modelExecution,
 -          admittedModel,
 -        );
-+        let compactModel = admittedModel;
-+        if (options?.compactModelSelection) {
-+          try {
-+            compactModel = createTurnModel(this, { selection: options.compactModelSelection });
-+          } catch (error) {
-+            // 自定义压缩模型不可解析时沿用本次已接纳模型，避免压缩设置破坏原有 compact。
-+            this.logger?.warn("Context compression model unavailable; using session model", {
-+              error: error instanceof Error ? error.message : String(error),
-+              sessionId: this.sessionId,
-+            });
-+          }
-+        } else {
-+          compactModel =
-+            (await applySubmissionExecutionState(
-+              this,
-+              options?.intent,
-+              turnTraceContext,
-+              options?.modelExecution,
-+              admittedModel,
-+            )) ?? admittedModel;
-+        }
++        // 自定义压缩模型不可解析时按自动通道处理，避免压缩设置破坏原有 compact。
++        const compactModel =
++          resolveCompactModel(this, options?.compactModelSelection ?? this.compactModelSelection) ??
++          (await applySubmissionExecutionState(
++            this,
++            options?.intent,
++            turnTraceContext,
++            options?.modelExecution,
++            admittedModel,
++          )) ??
++          admittedModel;
          return this.executeManualCompact(
            input,
            compactInstructions,
@@ -243,7 +548,7 @@ index ae42ea6d..891bffcc 100644
  
  export type ExecuteTurnOptions = ExecuteTurnOptionsBase &
 diff --git a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
-index cb358871..d9813c89 100644
+index cb358871..7870b8f5 100644
 --- a/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
 +++ b/apps/zcode-cli/packages/core/tests/runtime-compact.test.ts
 @@ -561,6 +561,51 @@ describe("runtime compact helpers", () => {
@@ -298,6 +603,167 @@ index cb358871..d9813c89 100644
    it("applies force MCS to Full Compact when the Active Model property is false", async () => {
      const compactRequests: ModelRequest[] = [];
      const runtime = createTestAgentRuntime(
+@@ -3149,6 +3194,125 @@ describe("AgentRuntime manual compact", () => {
+     expect(postCompactRequest).not.toContain(longPrompt);
+   });
+ 
++  it("auto compacts against the smaller context window of the compression model", async () => {
++    const sessionId = createSessionId("runtime-auto-compact-compression-window");
++    const eventStore = createTestSessionEventStore();
++    const requests: Array<{ kind: "compact" | "normal"; model: string }> = [];
++    let normalResponseCount = 0;
++    const runtime = createTestAgentRuntime(
++      sessionId,
++      {
++        compact: { bufferTokens: 10, summaryReserveTokens: 0 },
++        maxOutputTokens: 1,
++        modelSelection: createTestModelSelection("session-provider/session-model"),
++        systemPrompt: "You are an auto compact test agent.",
++      },
++      {
++        eventStore,
++        modelFactory: createTestModelFactory(
++          withStreamTextFromGenerateText({
++            properties: (input: { selection: { providerId: string } }) => ({
++              contextWindow: input.selection.providerId === "compression-provider" ? 120 : 200_000,
++            }),
++            async generateText(request, observation) {
++              const compact = providerContentToText(request.messages.at(-1)?.content).includes(
++                "create a detailed summary",
++              );
++              requests.push({
++                kind: compact ? "compact" : "normal",
++                model: `${observation.model.providerId}/${observation.model.modelId}`,
++              });
++              if (compact) {
++                return {
++                  finishReason: "stop",
++                  text: "<summary>Compression model summary.</summary>",
++                  usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
++                };
++              }
++              normalResponseCount++;
++              return {
++                finishReason: "stop",
++                text: `normal response ${normalResponseCount}`,
++                usage: {
++                  inputTokens: normalResponseCount === 2 ? 115 : 3,
++                  outputTokens: 1,
++                  totalTokens: normalResponseCount === 2 ? 116 : 4,
++                },
++              };
++            },
++          }) as never,
++        ),
++      },
++    );
++    runtime.setCompactModelSelection(
++      createTestModelSelection("compression-provider/compression-model"),
++    );
++
++    await runtime.executeTurn("auto compact warmup setup");
++    await runtime.executeTurn("old context ".repeat(80));
++    const result = await runtime.executeTurn("continue after compression model compact");
++
++    const events = await eventStore.getEvents(sessionId);
++    const boundary = events.find((event) => event.type === SessionEventType.CompactBoundary)
++      ?.payload as CompactBoundaryPayload | undefined;
++    expect(result.response).toBe("normal response 3");
++    expect(requests).toEqual([
++      { kind: "normal", model: "session-provider/session-model" },
++      { kind: "normal", model: "session-provider/session-model" },
++      { kind: "compact", model: "compression-provider/compression-model" },
++      { kind: "normal", model: "session-provider/session-model" },
++    ]);
++    expect(boundary).toMatchObject({ autoCompactThreshold: 109, trigger: CompactTrigger.Auto });
++    expect(runtime.getSessionModelSelection()).toEqual(
++      createTestModelSelection("session-provider/session-model"),
++    );
++  });
++
++  it("keeps the session model window when the compression model is unavailable", async () => {
++    const sessionId = createSessionId("runtime-auto-compact-compression-unavailable");
++    const eventStore = createTestSessionEventStore();
++    const requests: string[] = [];
++    const baseFactory = createTestModelFactory(
++      withStreamTextFromGenerateText({
++        async generateText(_request, observation) {
++          requests.push(`${observation.model.providerId}/${observation.model.modelId}`);
++          return {
++            finishReason: "stop",
++            text: "normal response",
++            usage: { inputTokens: 115, outputTokens: 1, totalTokens: 116 },
++          };
++        },
++      }) as never,
++    );
++    const runtime = createTestAgentRuntime(
++      sessionId,
++      {
++        compact: { bufferTokens: 10, summaryReserveTokens: 0 },
++        maxOutputTokens: 1,
++        modelSelection: createTestModelSelection("session-provider/session-model"),
++        systemPrompt: "You are an auto compact test agent.",
++      },
++      {
++        eventStore,
++        modelFactory: (input) => {
++          if (input.selection.providerId === "missing-provider") {
++            throw new Error("Provider Registry 中不存在 Provider: missing-provider");
++          }
++          return baseFactory(input);
++        },
++      },
++    );
++    runtime.setCompactModelSelection(createTestModelSelection("missing-provider/missing-model"));
++
++    await runtime.executeTurn("first turn");
++    await runtime.executeTurn("second turn");
++    await runtime.executeTurn("third turn");
++
++    const events = await eventStore.getEvents(sessionId);
++    expect(requests).toEqual(Array(3).fill("session-provider/session-model"));
++    expect(events.some((event) => event.type === SessionEventType.CompactBoundary)).toBe(false);
++  });
++
+   it("retries auto compact up to three attempts before continuing the turn", async () => {
+     const sessionId = createSessionId("runtime-auto-compact-retry");
+     const eventStore = createTestSessionEventStore();
+diff --git a/apps/zcode-cli/packages/core/tests/test-runtime-model.ts b/apps/zcode-cli/packages/core/tests/test-runtime-model.ts
+index 32bbc8d2..11a8594e 100644
+--- a/apps/zcode-cli/packages/core/tests/test-runtime-model.ts
++++ b/apps/zcode-cli/packages/core/tests/test-runtime-model.ts
+@@ -101,7 +101,9 @@ export function createTestModelFactory(implementation: {
+   ) => Promise<ModelResult>;
+   onCreate?: (input: RuntimeModelFactoryInput) => void;
+   maxOutputTokens?: number | ((input: RuntimeModelFactoryInput) => number);
+-  properties?: Partial<ModelProperties>;
++  properties?:
++    | Partial<ModelProperties>
++    | ((input: RuntimeModelFactoryInput) => Partial<ModelProperties>);
+   reasoningLevels?: readonly string[] | null;
+   streamText?: (
+     request: ModelRequest,
+@@ -123,6 +125,10 @@ export function createTestModelFactory(implementation: {
+       typeof implementation.maxOutputTokens === "function"
+         ? implementation.maxOutputTokens(input)
+         : (implementation.maxOutputTokens ?? 32_000);
++    const properties =
++      typeof implementation.properties === "function"
++        ? implementation.properties(input)
++        : implementation.properties;
+     const createModel = (options: ModelOptions): Model => {
+       const generateText =
+         implementation.generateText === undefined
+@@ -137,7 +143,7 @@ export function createTestModelFactory(implementation: {
+         options,
+         propertyOverrides: {
+           supportsMidConversationSystem: false,
+-          ...implementation.properties,
++          ...properties,
+         },
+         providerId: input.selection.providerId,
+       });
 diff --git a/packages/services/src/zcode-agent/zcodeAgent.ts b/packages/services/src/zcode-agent/zcodeAgent.ts
 index 4963b066..eecf3f72 100644
 --- a/packages/services/src/zcode-agent/zcodeAgent.ts
@@ -384,11 +850,12 @@ index 00000000..a2a7d15b
 +});
 diff --git a/packages/shared/src/context-compression.ts b/packages/shared/src/context-compression.ts
 new file mode 100644
-index 00000000..5aa2710e
+index 00000000..b326a014
 --- /dev/null
 +++ b/packages/shared/src/context-compression.ts
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,67 @@
 +import { z } from "zod";
++import type { ModelSelection } from "./model-selection.js";
 +
 +const nonEmptyString = z.string().trim().min(1);
 +
@@ -440,6 +907,19 @@ index 00000000..5aa2710e
 +  patch: Partial<ContextCompressionSettings>,
 +): ContextCompressionSettings {
 +  return resolveContextCompressionSettings({ ...current, ...patch });
++}
++
++/** 独立压缩通道的模型选择；自动通道或未选模型时返回 undefined，沿用会话模型。 */
++export function resolveContextCompressionModelSelection(
++  settings: ContextCompressionSettings | null | undefined,
++): ModelSelection | undefined {
++  if (settings?.channel !== "custom" || !settings.customSelection) return undefined;
++  const { customSelection, reasoningLevel } = settings;
++  return {
++    ...customSelection,
++    // 推理强度由压缩模型决定，会话模型支持的强度不能用于过滤独立模型的配置。
++    ...(reasoningLevel === "default" ? {} : { options: { reasoningLevel } }),
++  };
 +}
 diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
 index 3760a7f8..121dc939 100644
@@ -716,7 +1196,7 @@ index 7f0a99ce..b46ca608 100644
      // #79：分区渲染、一次性导航和持久偏好必须接受同一组合法 ID；否则设备管理
 diff --git a/packages/ui/src/settings/ContextCompressionSection.tsx b/packages/ui/src/settings/ContextCompressionSection.tsx
 new file mode 100644
-index 00000000..e2083c2f
+index 00000000..bf77519f
 --- /dev/null
 +++ b/packages/ui/src/settings/ContextCompressionSection.tsx
 @@ -0,0 +1,212 @@
@@ -933,7 +1413,7 @@ index 00000000..e2083c2f
 +  );
 +}
 diff --git a/packages/ui/src/settings/settingsPageConfig.ts b/packages/ui/src/settings/settingsPageConfig.ts
-index cbe776bd..f4d18f69 100644
+index cbe776bd..a6612514 100644
 --- a/packages/ui/src/settings/settingsPageConfig.ts
 +++ b/packages/ui/src/settings/settingsPageConfig.ts
 @@ -18,6 +18,7 @@ import {
